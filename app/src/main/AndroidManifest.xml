@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 可选短信取件码扫描：仅用户主动点击扫描时动态申请，冷启动不请求 -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 笔记提醒是「今晚 20:00」这类分钟级时刻，需要精确闹钟；未授权时自动退化为非精确 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+
+    <!-- Android 11+ 包可见性：用于学习通跳转、淘宝/菜鸟/拼多多出库身份码、微信及支付宝扫码 -->
+    <queries>
+        <package android:name="com.chaoxing.mobile" />
+        <package android:name="com.taobao.taobao" />
+        <package android:name="com.cainiao.wireless" />
+        <package android:name="com.xunmeng.pinduoduo" />
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.eg.android.AlipayGphone" />
+        <package android:name="com.jingdong.app.mall" />
+        <package android:name="cn.com.yunma.school.app" />
+        <package android:name="com.starthing.cliveapp" />
+    </queries>
+
+    <application
+        android:name=".TimetableApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:enableOnBackInvokedCallback="true"
+        android:theme="@style/Theme.Timetable">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Timetable">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".widget.ServiceWidgetActivity" android:exported="false" android:label="组件设备绑定" />
+        <activity android:name=".widget.ServiceWidgetPreviewActivity" android:exported="false" android:label="生活服务组件" />
+
+        <!-- 课程笔记提醒的精确闹钟回执（笔记到点发系统通知） -->
+        <receiver
+            android:name=".notify.NoteReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.fengkao.timetable.NOTE_REMINDER_TICK" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 上课提醒（课前 N 分钟 / 上课时刻） -->
+        <receiver
+            android:name="com.hmu.muye.notify.ClassReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.hmu.muye.CLASS_REMINDER_TICK" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 通知栏快递取件码本地识别（绝不联网外传） -->
+        <service
+            android:name="com.hmu.muye.data.parcel.ParcelNotificationListener"
+            android:label="牧野生活 · 取件码识别"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+        <receiver android:name=".widget.WaterControlWidgetProvider" android:exported="false" android:label="@string/water_control_widget_label">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/water_control_widget" />
+        </receiver>
+        <receiver android:name=".widget.ShowerControlWidgetProvider" android:exported="false" android:label="@string/shower_control_widget_label">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/shower_control_widget" />
+        </receiver>
+
+        <!-- Widget 真机预览 + 一键添加（仅本地数据渲染，无敏感操作） -->
+        <activity
+            android:name=".widget.WidgetPreviewActivity"
+            android:exported="true"
+            android:label="Widget 预览" />
+
+        <!-- 2×2：小尺寸核心 Widget -->
+        <receiver
+            android:name=".widget.Widget2x2Provider"
+            android:exported="false"
+            android:label="@string/widget_2x2_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="android.appwidget.action.APPWIDGET_OPTIONS_CHANGED" />
+                <action android:name="com.fengkao.timetable.widget.ALARM_TICK" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.DATE_CHANGED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/next_class_widget_2x2" />
+        </receiver>
+
+        <!-- 4×2：信息增强 Widget -->
+        <receiver
+            android:name=".widget.Widget4x2Provider"
+            android:exported="false"
+            android:label="@string/widget_4x2_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="android.appwidget.action.APPWIDGET_OPTIONS_CHANGED" />
+                <action android:name="com.fengkao.timetable.widget.ALARM_TICK" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.DATE_CHANGED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/next_class_widget_4x2" />
+        </receiver>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_file_paths" />
+        </provider>
+    </application>
+</manifest>

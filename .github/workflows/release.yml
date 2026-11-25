@@ -1,0 +1,132 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: '可选发布版本号（例如 v0.2.0），留空取 build.gradle.kts 版本'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK build-tools & platform 36
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 36 SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Validate and decode signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::缺少签名 Secrets（KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD），请先按 docs/RELEASE_AND_UPDATE_GUIDE.md 配置"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 --decode > timetable-release.jks
+          cat <<EOF > keystore.properties
+          storeFile=timetable-release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Run unit tests & build signed Release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease -Pmuye.updateRepo=${{ github.repository }} --no-daemon
+
+      - name: Prepare Release assets (APK + SHA-256 + update.json)
+        id: pkg
+        run: |
+          RAW_VER="${{ github.event.inputs.tag_name }}"
+          if [ -z "$RAW_VER" ]; then
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              RAW_VER="${GITHUB_REF_NAME}"
+            else
+              GRADLE_VER=$(grep -E "versionName\s*=" app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+              RAW_VER="v${GRADLE_VER}"
+            fi
+          fi
+          VERSION="${RAW_VER#v}"
+          SRC_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$SRC_APK" ] || [ ! -f "$SRC_APK" ]; then
+            echo "::error::未找到 Release APK 输出"
+            exit 1
+          fi
+          case "$SRC_APK" in
+            *-unsigned.apk)
+              echo "::error::检测到未签名 APK ($SRC_APK)，中止发布"
+              exit 1
+              ;;
+          esac
+          OUT_DIR="build/release-assets"
+          mkdir -p "$OUT_DIR"
+          APK_NAME="muye-hmu-${VERSION}-release.apk"
+          cp "$SRC_APK" "$OUT_DIR/$APK_NAME"
+          SHA256=$(sha256sum "$OUT_DIR/$APK_NAME" | awk '{print $1}')
+          SIZE=$(wc -c < "$OUT_DIR/$APK_NAME" | tr -d ' ')
+          echo "$SHA256  $APK_NAME" > "$OUT_DIR/${APK_NAME}.sha256"
+
+          VCODE=$(grep -E "versionCode\s*=" app/build.gradle.kts | head -n 1 | sed 's/[^0-9]//g')
+          cat <<EOF > "$OUT_DIR/update.json"
+          {
+            "version": "$VERSION",
+            "versionCode": ${VCODE:-1},
+            "title": "牧野生活 $VERSION",
+            "notes": "牧野生活（HMU）$VERSION 自动构建发布包。\nSHA-256: $SHA256",
+            "apkUrl": "https://github.com/${{ github.repository }}/releases/download/${RAW_VER}/${APK_NAME}",
+            "pageUrl": "https://github.com/${{ github.repository }}/releases/tag/${RAW_VER}",
+            "sha256": "$SHA256",
+            "size": $SIZE
+          }
+          EOF
+
+          echo "tag=${RAW_VER}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=${APK_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Clean signing files
+        if: always()
+        run: rm -f timetable-release.jks keystore.properties
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## 牧野生活（HMU）发布包
+            - 安装包：`${{ steps.pkg.outputs.apk_name }}`
+            - SHA-256: `${{ steps.pkg.outputs.sha256 }}`
+          files: |
+            build/release-assets/*.apk
+            build/release-assets/*.sha256
+            build/release-assets/update.json
