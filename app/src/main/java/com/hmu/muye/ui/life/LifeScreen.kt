@@ -32,6 +32,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,6 +62,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -398,6 +401,7 @@ fun LifeScreen(
             onDismiss = { showYxyDialog = false },
             onOpenApp = { IdentityCodeShortcuts.openYixiaoyuan(context) },
             onLogin = lifeModel::loginYixiaoyuan,
+            onLoginByPassword = lifeModel::loginYixiaoyuanByPassword,
             onLogout = lifeModel::logoutYixiaoyuan,
             onRefreshBalance = lifeModel::refreshCardBalance,
             onRefreshWaterCode = lifeModel::saveShiroJidAndRefresh,
@@ -1076,6 +1080,7 @@ private fun YixiaoyuanConfigDialog(
     onDismiss: () -> Unit,
     onOpenApp: () -> Unit,
     onLogin: (mobile: String, smsCode: String) -> Unit,
+    onLoginByPassword: (mobile: String, password: String) -> Unit = { _, _ -> },
     onLogout: () -> Unit,
     onRefreshBalance: () -> Unit,
     onRefreshWaterCode: (shiroJid: String) -> Unit,
@@ -1083,6 +1088,9 @@ private fun YixiaoyuanConfigDialog(
     onSave: (String, String?, String, String, String) -> Unit,
 ) {
     var mobile by rememberSaveable(savedMobile) { mutableStateOf(savedMobile) }
+    var password by rememberSaveable { mutableStateOf("") }
+    var showPassword by rememberSaveable { mutableStateOf(false) }
+    var useSmsLogin by rememberSaveable { mutableStateOf(false) }
     var smsCode by rememberSaveable { mutableStateOf("") }
     var ymId by rememberSaveable(state.ymId) { mutableStateOf(state.ymId) }
     var shiro by rememberSaveable { mutableStateOf("") }
@@ -1121,7 +1129,7 @@ private fun YixiaoyuanConfigDialog(
 
                 HorizontalDivider(color = Hairline)
 
-                Text("一卡通余额（官方短信登录）", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = InkDark)
+                Text("一卡通余额 · 易校园账号登录", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = InkDark)
                 if (signedIn) {
                     Text(
                         "已登录 ${savedMobile.ifBlank { state.ymId }} · 当前余额：${state.cardBalanceYuan?.let { "¥ %.2f".format(it) } ?: "待刷新"}",
@@ -1146,8 +1154,47 @@ private fun YixiaoyuanConfigDialog(
                         }
                     }
                 } else {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val pwdActive = !useSmsLogin
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (pwdActive) BrandGreen else BrandGreenSoft)
+                                .clickable { useSmsLogin = false }
+                                .padding(vertical = 7.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "密码直连登录",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (pwdActive) Color.White else BrandGreen,
+                            )
+                        }
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (useSmsLogin) BrandGreen else BrandGreenSoft)
+                                .clickable { useSmsLogin = true }
+                                .padding(vertical = 7.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "短信验证码",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (useSmsLogin) Color.White else BrandGreen,
+                            )
+                        }
+                    }
                     Text(
-                        "先点下方打开易校园 App 获取短信验证码，再填入此处提交登录即可同步一卡通余额。",
+                        if (useSmsLogin) {
+                            "先点下方打开易校园 App 获取短信验证码，再填入此处提交登录即可同步余额。"
+                        } else {
+                            "直接输入易校园手机号与密码即可直连登录，无需跳转官方 App。"
+                        },
                         fontSize = 11.sp,
                         color = InkGray,
                     )
@@ -1159,25 +1206,54 @@ private fun YixiaoyuanConfigDialog(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
-                        smsCode,
-                        { smsCode = it.filter(Char::isDigit).take(8) },
-                        label = { Text("短信验证码（在易校园 App 获取）") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!useSmsLogin) {
+                        OutlinedTextField(
+                            password,
+                            { password = it },
+                            label = { Text("易校园登录密码") },
+                            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { showPassword = !showPassword }) {
+                                    Icon(
+                                        if (showPassword) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                                        contentDescription = "显示/隐藏密码",
+                                        tint = InkGray,
+                                    )
+                                }
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                         Button(
-                            onClick = { onLogin(mobile, smsCode) },
-                            enabled = !busy && mobile.isNotBlank() && smsCode.isNotBlank(),
-                            modifier = Modifier.weight(1f),
+                            onClick = { onLoginByPassword(mobile, password) },
+                            enabled = !busy && mobile.isNotBlank() && password.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
                         ) {
-                            Text(if (busy) "登录中…" else "验证码登录")
+                            Text(if (busy) "登录中…" else "登录易校园")
                         }
-                        OutlinedButton(onClick = onOpenApp, modifier = Modifier.weight(1f)) {
-                            Text("打开易校园")
+                    } else {
+                        OutlinedTextField(
+                            smsCode,
+                            { smsCode = it.filter(Char::isDigit).take(8) },
+                            label = { Text("短信验证码（在易校园 App 获取）") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { onLogin(mobile, smsCode) },
+                                enabled = !busy && mobile.isNotBlank() && smsCode.isNotBlank(),
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
+                            ) {
+                                Text(if (busy) "登录中…" else "验证码登录")
+                            }
+                            OutlinedButton(onClick = onOpenApp, modifier = Modifier.weight(1f)) {
+                                Text("打开易校园")
+                            }
                         }
                     }
                 }

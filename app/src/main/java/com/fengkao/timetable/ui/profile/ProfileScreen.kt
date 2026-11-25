@@ -166,22 +166,23 @@ fun ProfileScreen(
                     }
                 }
                 ProfilePage.TEACHING_SYNC -> {
-                    var showJwWebLogin by rememberSaveable { mutableStateOf(false) }
+                    var showJwLogin by rememberSaveable { mutableStateOf(false) }
                     SettingsSection {
-                        SettingsValue("同步账号", maskAccount(s.account))
+                        SettingsValue("同步账号", maskAccount(viewModel.savedJwUsername()))
                         SettingsValue("数据来源", "超星综合教学管理系统")
-                        SettingsValue("网页会话", if (state.jwConnected) "已连接（Cookie 加密保存）" else "未登录")
+                        SettingsValue("教务会话", if (state.jwConnected) "已连接（会话加密保存）" else "未登录")
                         SettingsItem("教务系统地址", Icons.Outlined.Language, value = hostOf(s.baseUrl), divider = true) { editor = "url" }
-                        SettingsItem("打开超星教务网页登录", Icons.Outlined.School, "兼容验证码、统一认证与学习通扫码") { showJwWebLogin = true }
+                        SettingsItem("登录超星教务", Icons.Outlined.School, "使用学号密码接口直连（支持网页备用）") { showJwLogin = true }
                     }
-                    SettingsHint("河南牧业经济学院教务入口默认连接 hnuahe.jw.chaoxing.com；网页登录完成后会自动加密保存本机 Cookie。")
-                    if (showJwWebLogin) {
-                        com.hmu.muye.data.jw.ChaoxingWebLoginDialog(
+                    SettingsHint("河南牧业经济学院教务入口默认连接 hnuahe.jw.chaoxing.com；接口登录后会自动加密保存会话 Cookie。")
+                    if (showJwLogin) {
+                        com.hmu.muye.data.jw.ChaoxingDirectLoginDialog(
                             baseUrl = s.baseUrl,
-                            onDismiss = { showJwWebLogin = false },
-                            onCapturedCookies = { cookies ->
-                                showJwWebLogin = false
-                                viewModel.onChaoxingWebLoginCaptured(cookies)
+                            initialUsername = viewModel.savedJwUsername(),
+                            onDismiss = { showJwLogin = false },
+                            onLoginSuccess = { user, pwd, cookies ->
+                                showJwLogin = false
+                                viewModel.onChaoxingDirectLoginSuccess(user, pwd, cookies)
                             },
                         )
                     }
@@ -196,7 +197,7 @@ fun ProfileScreen(
                         life.yixiaoyuanSignedIn -> "已登录 · ${maskAccount(life.yixiaoyuanMobile)}"
                         yxy.showerCode.isNotBlank() -> "用水码 ${yxy.formattedShowerCode()}"
                         yxy.hasCredential -> "已配 shiroJID · 点击刷新 8 位用水码"
-                        else -> "短信登录查余额 · 8 位动态用水码"
+                        else -> "密码/短信登录查余额 · 8 位动态用水码"
                     }
                     SettingsSection {
                         AccountItem("喝水账户", Icons.Outlined.WaterDrop, maskAccount(water.phone), water.loggedIn, water.busy, { go(ProfilePage.WATER) }, divider = true)
@@ -216,6 +217,7 @@ fun ProfileScreen(
                     statusError = life.statusError,
                     onOpenApp = { IdentityCodeShortcuts.openYixiaoyuan(context) },
                     onLogin = lifeModel::loginYixiaoyuan,
+                    onLoginByPassword = lifeModel::loginYixiaoyuanByPassword,
                     onLogout = lifeModel::logoutYixiaoyuan,
                     onRefreshBalance = lifeModel::refreshCardBalance,
                     onRefreshWaterCode = lifeModel::saveShiroJidAndRefresh,

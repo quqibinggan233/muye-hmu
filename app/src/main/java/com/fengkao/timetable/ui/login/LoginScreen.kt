@@ -3,6 +3,7 @@ package com.fengkao.timetable.ui.login
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,7 +30,6 @@ import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -96,17 +96,16 @@ fun LoginScreen(viewModel: MainViewModel) {
             Spacer(Modifier.height(22.dp))
 
             TeachingLoginForm(viewModel)
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(6.dp))
 
-            OutlinedButton(
+            TextButton(
                 onClick = { showWebLogin = true },
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth().height(48.dp),
+                modifier = Modifier.align(Alignment.CenterHorizontally),
             ) {
-                Text("通过超星教务网页登录（用于成绩 / 考试 / 空教室）", color = BrandGreen, fontWeight = FontWeight.SemiBold)
+                Text("遇到验证码或统一认证？切换网页登录", fontSize = 12.sp, color = InkMid)
             }
 
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(6.dp))
             TextButton(
                 onClick = { viewModel.enterWithoutTeachingLogin() },
                 enabled = !state.loginBusy,
@@ -145,10 +144,13 @@ fun LoginScreen(viewModel: MainViewModel) {
 }
 
 @Composable
-internal fun TeachingLoginForm(viewModel: MainViewModel, submitLabel: String = "登录学习通并同步课表") {
+internal fun TeachingLoginForm(viewModel: MainViewModel, submitLabel: String? = null) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
-    var account by rememberSaveable { mutableStateOf(state.settings.account) }
+    var useJwApi by rememberSaveable { mutableStateOf(true) }
+    var account by rememberSaveable(state.settings.account) {
+        mutableStateOf(viewModel.savedJwUsername().ifBlank { state.settings.account })
+    }
     var password by rememberSaveable { mutableStateOf("") }
     var showPassword by rememberSaveable { mutableStateOf(false) }
     var remember by rememberSaveable { mutableStateOf(true) }
@@ -162,11 +164,68 @@ internal fun TeachingLoginForm(viewModel: MainViewModel, submitLabel: String = "
             .background(CardWhite)
             .padding(20.dp)
     ) {
-        FieldLabel("学习通手机号 / 账号")
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (useJwApi) BrandGreen else BrandGreenSoft)
+                    .clickable {
+                        if (!useJwApi) {
+                            useJwApi = true
+                            viewModel.clearLoginError()
+                        }
+                    }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "超星教务（学号）",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (useJwApi) Color.White else BrandGreen,
+                )
+            }
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (!useJwApi) BrandGreen else BrandGreenSoft)
+                    .clickable {
+                        if (useJwApi) {
+                            useJwApi = false
+                            viewModel.clearLoginError()
+                        }
+                    }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "学习通（手机号）",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (!useJwApi) Color.White else BrandGreen,
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            if (useJwApi) "一次登录即可通过后端接口打通课表、成绩、考试与空教室。"
+            else "免验证码同步个人课表，同时连接首页学习通作业与调课通知。",
+            fontSize = 11.sp,
+            color = InkGray,
+            lineHeight = 16.sp,
+        )
+        Spacer(Modifier.height(12.dp))
+
+        FieldLabel(if (useJwApi) "教务学号" else "学习通手机号 / 账号")
         OutlinedTextField(
             value = account,
-            onValueChange = { account = it },
-            placeholder = { Text("请输入学习通手机号或账号", color = InkGray) },
+            onValueChange = { account = it; viewModel.clearLoginError() },
+            placeholder = { Text(if (useJwApi) "请输入学号（例如 2502...）" else "请输入学习通手机号或账号", color = InkGray) },
             singleLine = true,
             shape = RoundedCornerShape(14.dp),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
@@ -175,11 +234,11 @@ internal fun TeachingLoginForm(viewModel: MainViewModel, submitLabel: String = "
         )
 
         Spacer(Modifier.height(14.dp))
-        FieldLabel("学习通密码")
+        FieldLabel(if (useJwApi) "教务密码" else "学习通密码")
         OutlinedTextField(
             value = password,
-            onValueChange = { password = it },
-            placeholder = { Text("请输入学习通密码", color = InkGray) },
+            onValueChange = { password = it; viewModel.clearLoginError() },
+            placeholder = { Text(if (useJwApi) "请输入超星教务密码" else "请输入学习通密码", color = InkGray) },
             singleLine = true,
             shape = RoundedCornerShape(14.dp),
             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
@@ -209,7 +268,11 @@ internal fun TeachingLoginForm(viewModel: MainViewModel, submitLabel: String = "
                 onCheckedChange = { remember = it },
                 colors = CheckboxDefaults.colors(checkedColor = BrandGreen),
             )
-            Text("记住密码并自动更新课表", fontSize = 13.sp, color = InkMid)
+            Text(
+                if (useJwApi) "加密记住密码并支持自动更新课表" else "记住密码并自动更新课表",
+                fontSize = 13.sp,
+                color = InkMid,
+            )
         }
 
         TextButton(onClick = { advanced = !advanced }) {
@@ -235,7 +298,11 @@ internal fun TeachingLoginForm(viewModel: MainViewModel, submitLabel: String = "
 
         Button(
             onClick = {
-                viewModel.login(account.trim(), password, baseUrl.trim(), remember)
+                if (useJwApi) {
+                    viewModel.loginJw(account.trim(), password, baseUrl.trim(), remember)
+                } else {
+                    viewModel.login(account.trim(), password, baseUrl.trim(), remember)
+                }
             },
             enabled = !state.loginBusy,
             shape = RoundedCornerShape(24.dp),
@@ -249,7 +316,11 @@ internal fun TeachingLoginForm(viewModel: MainViewModel, submitLabel: String = "
                     modifier = Modifier.size(20.dp),
                 )
             } else {
-                Text(submitLabel, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    submitLabel ?: if (useJwApi) "登录超星教务并同步课表" else "登录学习通并同步课表",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         }
 

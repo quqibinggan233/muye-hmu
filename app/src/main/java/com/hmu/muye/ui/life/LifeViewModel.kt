@@ -283,11 +283,28 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** 账号密码直连登录易校园，无需跳转官方 App，成功后直接拉取一卡通余额。 */
+    fun loginYixiaoyuanByPassword(mobile: String, password: String) {
+        if (_state.value.yixiaoyuanBusy) return
+        if (mobile.isBlank() || password.isBlank()) {
+            _state.update { it.copy(statusMessage = "请填写手机号与登录密码", statusError = true) }
+            return
+        }
+        _state.update { it.copy(yixiaoyuanBusy = true, statusMessage = null, statusError = false) }
+        viewModelScope.launch {
+            val deviceId = campusLife.yixiaoyuanDeviceId()
+            val r = withContext(Dispatchers.IO) {
+                yixiaoyuanClient.loginByPassword(mobile, password, deviceId)
+            }
+            handleYixiaoyuanLoginResult(r)
+        }
+    }
+
     /**
      * 短信验证码登录易校园，换取 token / uuToken。
      *
      * 验证码需在官方 App「获取验证码」后填入（发送接口需要官方 native 生成的安全令牌，
-     * 本项目未实现），提交这一步服务端不校验签名。
+     * 本项目未实现），提交这一步服务端不校验签名；推荐优先使用 [loginYixiaoyuanByPassword]。
      */
     fun loginYixiaoyuan(mobile: String, verificationCode: String) {
         if (_state.value.yixiaoyuanBusy) return
@@ -301,28 +318,32 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
             val r = withContext(Dispatchers.IO) {
                 yixiaoyuanClient.loginByVerificationCode(mobile, verificationCode, deviceId)
             }
-            when (r) {
-                is YixiaoyuanResult.Success -> {
-                    campusLife.saveYixiaoyuanCredential(r.data)
-                    val next = _state.value.yixiaoyuan.copy(ymId = r.data.ymId)
-                    campusLife.saveYixiaoyuan(next)
-                    _state.update {
-                        it.copy(
-                            yixiaoyuan = next,
-                            yixiaoyuanSignedIn = r.data.signedIn,
-                            yixiaoyuanMobile = r.data.mobile,
-                            yixiaoyuanBusy = false,
-                            statusMessage = "易校园登录成功，正在获取余额…",
-                            statusError = false,
-                        )
-                    }
-                    refreshCardBalance()
+            handleYixiaoyuanLoginResult(r)
+        }
+    }
+
+    private fun handleYixiaoyuanLoginResult(r: YixiaoyuanResult<YixiaoyuanCredential>) {
+        when (r) {
+            is YixiaoyuanResult.Success -> {
+                campusLife.saveYixiaoyuanCredential(r.data)
+                val next = _state.value.yixiaoyuan.copy(ymId = r.data.ymId)
+                campusLife.saveYixiaoyuan(next)
+                _state.update {
+                    it.copy(
+                        yixiaoyuan = next,
+                        yixiaoyuanSignedIn = r.data.signedIn,
+                        yixiaoyuanMobile = r.data.mobile,
+                        yixiaoyuanBusy = false,
+                        statusMessage = "易校园登录成功，正在获取余额…",
+                        statusError = false,
+                    )
                 }
-                is YixiaoyuanResult.SessionExpired ->
-                    _state.update { it.copy(yixiaoyuanBusy = false, statusMessage = r.message, statusError = true) }
-                is YixiaoyuanResult.Error ->
-                    _state.update { it.copy(yixiaoyuanBusy = false, statusMessage = r.message, statusError = true) }
+                refreshCardBalance()
             }
+            is YixiaoyuanResult.SessionExpired ->
+                _state.update { it.copy(yixiaoyuanBusy = false, statusMessage = r.message, statusError = true) }
+            is YixiaoyuanResult.Error ->
+                _state.update { it.copy(yixiaoyuanBusy = false, statusMessage = r.message, statusError = true) }
         }
     }
 
@@ -331,7 +352,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.yixiaoyuanBusy) return
         val credential = campusLife.yixiaoyuanCredential()
         if (!credential.signedIn) {
-            _state.update { it.copy(statusMessage = "请先用短信验证码登录易校园", statusError = true) }
+            _state.update { it.copy(statusMessage = "请先登录易校园账号", statusError = true) }
             return
         }
         _state.update { it.copy(yixiaoyuanBusy = true, statusMessage = null, statusError = false) }

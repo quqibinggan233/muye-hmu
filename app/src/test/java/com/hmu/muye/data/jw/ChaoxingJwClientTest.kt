@@ -258,4 +258,81 @@ class ChaoxingJwClientTest {
         val date = ChaoxingJwClient.parseTermStartDateJson("""{"ksrq":"2026-09-07","xnxqh":"2026-2027-1"}""")
         assertEquals(LocalDate.of(2026, 9, 7), date)
     }
+
+    @Test
+    fun `loginWithPassword follows redirect and collects cookies`() {
+        server.enqueue(MockResponse().setResponseCode(200).addHeader("Set-Cookie", "uid=u1; Path=/"))
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(302)
+                .addHeader("Location", "/admin")
+                .addHeader("Set-Cookie", "jw_uf=ok; Path=/")
+                .addHeader("Set-Cookie", "puid=p1; Path=/"),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("Set-Cookie", "yysz=1; Path=/")
+                .setBody("<html><title>超星综合教学管理系统</title></html>"),
+        )
+
+        val res = client.loginWithPassword("20240001", "MockJwPass!99")
+        assertTrue(res is JwLoginResult.Success)
+        val cookies = (res as JwLoginResult.Success).cookies
+        assertTrue(cookies.contains("uid=u1"))
+        assertTrue(cookies.contains("jw_uf=ok"))
+        assertTrue(cookies.contains("puid=p1"))
+        assertTrue(cookies.contains("yysz=1"))
+
+        val initReq = server.takeRequest()
+        assertEquals("GET", initReq.method)
+        assertEquals("/admin/login", initReq.path)
+
+        val postReq = server.takeRequest()
+        assertEquals("POST", postReq.method)
+        assertEquals("/admin/login", postReq.path)
+        val form = postReq.body.readUtf8()
+        assertTrue(form.contains("username=20240001"))
+        assertTrue(form.contains("rememberMe=1"))
+        assertTrue(postReq.getHeader("Cookie")?.contains("uid=u1") == true)
+
+        val followReq = server.takeRequest()
+        assertEquals("GET", followReq.method)
+        assertEquals("/admin", followReq.path)
+    }
+
+    @Test
+    fun `loginWithPassword parses inline error variable`() {
+        server.enqueue(MockResponse().setResponseCode(200))
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""<script>var error = "用户或密码错误, 请重试。";</script>"""),
+        )
+
+        val res = client.loginWithPassword("20240001", "bad")
+        assertTrue(res is JwLoginResult.InvalidCredentials)
+        assertEquals("用户或密码错误, 请重试。", (res as JwLoginResult.InvalidCredentials).message)
+    }
+
+    @Test
+    fun `loginWithPassword returns NeedWebFallback on captcha redirect`() {
+        server.enqueue(MockResponse().setResponseCode(200))
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(302)
+                .addHeader("Location", "/admin/login?jcaptchaError=1"),
+        )
+
+        val res = client.loginWithPassword("20240001", "MockPass")
+        assertTrue(res is JwLoginResult.NeedWebFallback)
+    }
+
+    @Test
+    fun `verifySession uses admin endpoint`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("<html><title>超星综合教学管理系统</title></html>"))
+        assertTrue(client.verifySession("uid=u1"))
+        val req = server.takeRequest()
+        assertEquals("/admin", req.path)
+    }
 }

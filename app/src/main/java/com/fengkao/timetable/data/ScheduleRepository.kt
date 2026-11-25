@@ -11,6 +11,7 @@ import com.fengkao.timetable.data.model.CourseBlock
 import com.hmu.muye.data.jw.ChaoxingJwClient
 import com.hmu.muye.data.jw.ChaoxingJwStore
 import com.hmu.muye.data.jw.JwFetchResult
+import com.hmu.muye.data.jw.JwLoginResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -72,8 +73,13 @@ class ScheduleRepository(
             }
         }
 
-        if (cookies.isBlank()) {
-            return@withContext SyncOutcome.Failure("请先登录学习通账号，或通过「超星教务网页登录」获取会话后再同步")
+        val baseUrl = s.baseUrl.ifBlank { ChaoxingJwStore.DEFAULT_JW_BASE }
+        val client = ChaoxingJwClient(baseUrl)
+        var effectiveCookies = cookies.ifBlank {
+            refreshJwSessionQuietly(client, baseUrl, onLog).orEmpty()
+        }
+        if (effectiveCookies.isBlank()) {
+            return@withContext SyncOutcome.Failure("请先登录超星教务或学习通账号后再同步课表")
         }
 
         val calendarTerm = TermCalculator.autoTerm()
@@ -83,18 +89,25 @@ class ScheduleRepository(
             onLog("当前目标为 ${it.xnm}-${it.xnm + 1} 学年第 ${it.term} 学期")
         }
 
-        val baseUrl = s.baseUrl.ifBlank { ChaoxingJwStore.DEFAULT_JW_BASE }
-        val client = ChaoxingJwClient(baseUrl)
         onLog("连接超星教务（${baseUrl.removePrefix("https://")}）…")
 
-        val result = fetchMutex.withLock {
-            client.fetchSchedule(cookies, s.account, target)
+        var result = fetchMutex.withLock {
+            client.fetchSchedule(effectiveCookies, s.account, target)
+        }
+        if (result is JwFetchResult.NeedWebLogin) {
+            val renewed = refreshJwSessionQuietly(client, baseUrl, onLog)
+            if (!renewed.isNullOrBlank()) {
+                effectiveCookies = renewed
+                result = fetchMutex.withLock {
+                    client.fetchSchedule(effectiveCookies, s.account, target)
+                }
+            }
         }
         when (result) {
             is JwFetchResult.Success -> {
                 if (!s.hasTermStartFor(target)) {
                     val xnxq = "${target.xnm}-${target.xnm + 1}-${target.term}"
-                    val termStart = client.fetchTermStartDate(cookies, xnxq)
+                    val termStart = client.fetchTermStartDate(effectiveCookies, xnxq)
                     if (termStart != null) {
                         settings.setTermStartEpochDay(termStart.toEpochDay(), target)
                     }
@@ -113,6 +126,24 @@ class ScheduleRepository(
                 onLog(result.message)
                 SyncOutcome.Failure(result.message)
             }
+        }
+    }
+
+    private fun refreshJwSessionQuietly(
+        client: ChaoxingJwClient,
+        baseUrl: String,
+        onLog: (String) -> Unit,
+    ): String? {
+        val user = jwStore.username()
+        val pass = jwStore.password()
+        if (user.isBlank() || pass.isBlank()) return null
+        onLog("教务会话已过期，尝试自动重新登录…")
+        return when (val login = client.loginWithPassword(user, pass)) {
+            is JwLoginResult.Success -> {
+                jwStore.saveSession(login.cookies, baseUrl)
+                login.cookies
+            }
+            else -> null
         }
     }
 

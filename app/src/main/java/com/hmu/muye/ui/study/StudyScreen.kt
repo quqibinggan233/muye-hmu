@@ -79,7 +79,7 @@ import com.fengkao.timetable.ui.xuexitong.XuexitongLauncher
 import com.fengkao.timetable.ui.xuexitong.XuexitongLogin
 import com.fengkao.timetable.ui.xuexitong.XuexitongUiState
 import com.fengkao.timetable.ui.xuexitong.XuexitongViewModel
-import com.hmu.muye.data.jw.ChaoxingWebLoginDialog
+import com.hmu.muye.data.jw.ChaoxingDirectLoginDialog
 import com.hmu.muye.data.jw.ExamNote
 import com.hmu.muye.data.jw.GradeItem
 import com.hmu.muye.data.parcel.IdentityCodeShortcuts
@@ -107,6 +107,9 @@ fun StudyScreen(
     LaunchedEffect(Unit) {
         studyModel.refreshSessionState()
         xuexitongModel.enter()
+    }
+    LaunchedEffect(main.jwConnected) {
+        studyModel.refreshSessionState()
     }
     LaunchedEffect(xuexitong.loggedIn, xuexitong.sessionExpired) {
         if (xuexitong.loggedIn && !xuexitong.sessionExpired) {
@@ -220,13 +223,14 @@ fun StudyScreen(
     }
 
     if (showJwLogin) {
-        ChaoxingWebLoginDialog(
+        ChaoxingDirectLoginDialog(
             baseUrl = main.settings.baseUrl,
+            initialUsername = studyModel.savedJwUsername().ifBlank { mainModel.savedJwUsername() },
             onDismiss = { showJwLogin = false },
-            onCapturedCookies = { cookies ->
+            onLoginSuccess = { user, pwd, cookies ->
                 showJwLogin = false
-                studyModel.onWebLoginCaptured(cookies)
-                mainModel.onChaoxingWebLoginCaptured(cookies)
+                studyModel.onDirectLoginSuccess(user, pwd, cookies)
+                mainModel.onChaoxingDirectLoginSuccess(user, pwd, cookies)
             },
         )
     }

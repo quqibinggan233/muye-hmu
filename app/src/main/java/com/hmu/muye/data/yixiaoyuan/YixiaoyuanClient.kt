@@ -5,7 +5,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.security.KeyFactory
+import java.security.spec.X509EncodedKeySpec
+import java.util.Base64
 import java.util.concurrent.TimeUnit
+import javax.crypto.Cipher
 
 /**
  * 易校园「校园卡 / 用户」接口客户端（compus.xiaofubao.com）。
@@ -27,11 +31,57 @@ class YixiaoyuanClient(
 ) {
 
     /**
+     * 账号密码直连登录：先拉取服务端 RSA 公钥（`/login/getPublicKey`），
+     * 用 `RSA/ECB/PKCS1Padding` + Base64 加密密码后提交 `/login/doLoginByPwd`，无需跳转官方 App。
+     */
+    fun loginByPassword(
+        mobile: String,
+        password: String,
+        deviceId: String,
+        schoolCode: String = YixiaoyuanCredential.DEFAULT_SCHOOL_CODE,
+    ): YixiaoyuanResult<YixiaoyuanCredential> {
+        val cleanMobile = mobile.trim()
+        if (cleanMobile.isBlank() || password.isBlank()) {
+            return YixiaoyuanResult.Error("请填写手机号与登录密码")
+        }
+        val keyBody = baseDeviceBody(deviceId, schoolCode)
+        val keyReq = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/login/getPublicKey")
+            .header("Content-Type", JSON_MEDIA.toString())
+            .post(keyBody.toJson().toString().toRequestBody(JSON_MEDIA))
+            .build()
+        val publicKeyB64 = when (val keyRes = execute(keyReq)) {
+            is YixiaoyuanResult.Error -> return keyRes
+            is YixiaoyuanResult.SessionExpired -> return keyRes
+            is YixiaoyuanResult.Success -> {
+                keyRes.data.optJSONObject("data")?.optString("publicKey")?.trim().orEmpty()
+            }
+        }
+        if (publicKeyB64.isBlank()) {
+            return YixiaoyuanResult.Error("未获取到易校园登录公钥")
+        }
+        val cipherPwd = runCatching { encryptPasswordRsa(password, publicKeyB64) }.getOrElse { e ->
+            return YixiaoyuanResult.Error("密码加密失败：${e.message ?: "密钥格式异常"}")
+        }
+
+        val loginBody = baseDeviceBody(deviceId, schoolCode).apply {
+            put("mobilePhone", cleanMobile)
+            put("password", cipherPwd)
+        }
+        val loginReq = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/login/doLoginByPwd")
+            .header("Content-Type", JSON_MEDIA.toString())
+            .post(loginBody.toJson().toString().toRequestBody(JSON_MEDIA))
+            .build()
+        return executeLoginRequest(loginReq, cleanMobile, deviceId, schoolCode)
+    }
+
+    /**
      * 短信验证码登录，成功后返回带 [YixiaoyuanCredential.uuToken] 的凭据。
      *
      * 注意：**发送**验证码（`/compus/user/sendLoginVerificationCode`）需要官方客户端
      * native 生成的 `securityToken` / `appSecurityToken` 与图形验证码，本客户端尚未实现，
-     * 因此验证码需在官方 App 内获取后填入。**提交**这一步不需要额外令牌。
+     * 因此短信方式需在官方 App 内获取验证码后填入；建议优先使用上方的密码直连登录。
      */
     fun loginByVerificationCode(
         mobile: String,
@@ -39,51 +89,74 @@ class YixiaoyuanClient(
         deviceId: String,
         schoolCode: String = YixiaoyuanCredential.DEFAULT_SCHOOL_CODE,
     ): YixiaoyuanResult<YixiaoyuanCredential> {
-        val body = linkedMapOf<String, Any>(
-            "appVersion" to YixiaoyuanCredential.APP_VERSION,
-            "appAllVersion" to APP_ALL_VERSION,
-            "appPlatform" to "Android",
-            "osType" to "Android",
-            "osVersion" to "15",
-            "brand" to "google",
-            "mobileType" to "sdk_gphone64_arm64",
-            "platform" to PLATFORM,
-            "deviceId" to deviceId,
-            "mobilePhone" to mobile.trim(),
-            "verificationCode" to verificationCode.trim(),
-            "schoolCode" to schoolCode,
-            "token" to "",
-            "linkUserId" to "",
-            "invitationCode" to "",
-            "nt" to now(),
-        )
+        val cleanMobile = mobile.trim()
+        val body = baseDeviceBody(deviceId, schoolCode).apply {
+            put("mobilePhone", cleanMobile)
+            put("verificationCode", verificationCode.trim())
+            put("linkUserId", "")
+            put("invitationCode", "")
+        }
         val req = Request.Builder()
             .url(baseUrl.trimEnd('/') + "/login/doLoginByVerificationCode")
             .header("Content-Type", JSON_MEDIA.toString())
             .post(body.toJson().toString().toRequestBody(JSON_MEDIA))
             .build()
+        return executeLoginRequest(req, cleanMobile, deviceId, schoolCode)
+    }
 
-        return when (val r = execute(req)) {
-            is YixiaoyuanResult.Error -> r
-            is YixiaoyuanResult.SessionExpired -> r
-            is YixiaoyuanResult.Success -> {
-                val data = r.data.optJSONObject("data")
-                    ?: return YixiaoyuanResult.Error("登录响应缺少 data")
-                val credential = YixiaoyuanCredential(
-                    token = data.optString("token"),
-                    uuToken = data.optString("uuToken"),
-                    ymId = data.optString("id"),
-                    deviceId = deviceId,
-                    schoolCode = data.optString("schoolCode").ifBlank { schoolCode },
-                    mobile = mobile.trim(),
-                )
-                if (!credential.signedIn) {
-                    YixiaoyuanResult.Error("登录响应缺少 token / uuToken / id，可能学校或账号不支持")
-                } else {
-                    YixiaoyuanResult.Success(credential)
-                }
+    private fun baseDeviceBody(deviceId: String, schoolCode: String): LinkedHashMap<String, Any> = linkedMapOf(
+        "appVersion" to YixiaoyuanCredential.APP_VERSION,
+        "appAllVersion" to APP_ALL_VERSION,
+        "appPlatform" to "Android",
+        "osType" to "Android",
+        "osVersion" to "15",
+        "brand" to "google",
+        "mobileType" to "sdk_gphone64_arm64",
+        "platform" to PLATFORM,
+        "deviceId" to deviceId,
+        "schoolCode" to schoolCode,
+        "token" to "",
+        "nt" to now(),
+    )
+
+    private fun executeLoginRequest(
+        req: Request,
+        mobile: String,
+        deviceId: String,
+        schoolCode: String,
+    ): YixiaoyuanResult<YixiaoyuanCredential> = when (val r = execute(req)) {
+        is YixiaoyuanResult.Error -> r
+        is YixiaoyuanResult.SessionExpired -> r
+        is YixiaoyuanResult.Success -> {
+            val data = r.data.optJSONObject("data")
+                ?: return YixiaoyuanResult.Error("登录响应缺少 data")
+            val credential = YixiaoyuanCredential(
+                token = data.optString("token"),
+                uuToken = data.optString("uuToken"),
+                ymId = data.optString("id"),
+                deviceId = deviceId,
+                schoolCode = data.optString("schoolCode").ifBlank { schoolCode },
+                mobile = mobile,
+            )
+            if (!credential.signedIn) {
+                YixiaoyuanResult.Error("登录响应缺少 token / uuToken / id，可能学校或账号不支持")
+            } else {
+                YixiaoyuanResult.Success(credential)
             }
         }
+    }
+
+    private fun encryptPasswordRsa(plainPassword: String, publicKeyBase64: String): String {
+        val cleaned = publicKeyBase64
+            .replace("-----BEGIN PUBLIC KEY-----", "")
+            .replace("-----END PUBLIC KEY-----", "")
+            .replace("\\s+".toRegex(), "")
+        val keyBytes = Base64.getDecoder().decode(cleaned)
+        val publicKey = KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(keyBytes))
+        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+        cipher.init(Cipher.ENCRYPT_MODE, publicKey)
+        val encrypted = cipher.doFinal(plainPassword.toByteArray(Charsets.UTF_8))
+        return Base64.getEncoder().encodeToString(encrypted)
     }
 
     /** 查询一卡通余额（单位：元）。服务端以字符串返回，例如 `"0"`、`"12.30"`。 */

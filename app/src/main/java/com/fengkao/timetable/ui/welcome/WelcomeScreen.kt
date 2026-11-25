@@ -61,14 +61,15 @@ import com.fengkao.timetable.ui.water.WaterViewModel
 import com.fengkao.timetable.ui.xuexitong.XuexitongLogin
 import com.fengkao.timetable.ui.xuexitong.XuexitongNotificationPermissionEffect
 import com.fengkao.timetable.ui.xuexitong.XuexitongViewModel
+import com.hmu.muye.data.jw.ChaoxingDirectLoginDialog
 import com.hmu.muye.data.jw.ChaoxingWebLoginDialog
 import com.hmu.muye.data.parcel.IdentityCodeShortcuts
 import com.hmu.muye.ui.life.LifeViewModel
 
 private enum class WelcomeStep(val label: String, val title: String, val subtitle: String) {
     INTRO("欢迎", "欢迎使用牧野生活", "HMU 校园大小事，一站搞定"),
-    TEACHING("课表", "登录学习通同步课表", "登录一次学习通即可同时同步课表与课程通知；如需查成绩、考试或空教室，也可点下方超星教务网页登录。"),
-    SERVICES("服务", "连接校园服务", "喝水（慧生活 798）、易校园、超星教务与学习通可在此配置，也可稍后在「生活 / 我的」绑定。"),
+    TEACHING("课表", "登录课表账户", "支持超星教务（学号密码）或学习通（手机号密码）纯接口直连登录，无需跳转网页。"),
+    SERVICES("服务", "连接校园服务", "喝水（慧生活 798）、易校园、超星教务与学习通可在此直连配置，也可稍后绑定。"),
     PREFERENCES("偏好", "按你的习惯看课表", "调整常用设置，之后也能在“我的”里修改。"),
     READY("完成", "设置好了", "你的牧野生活，准备就绪。"),
 }
@@ -163,7 +164,7 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                             },
                             subtitle = when (page) {
                                 "water" -> "使用慧生活798账户，登录后可绑定龙子湖饮水设备。"
-                                "shower" -> "可在此页直接短信登录查看一卡通余额（可按需隐藏），或配置 shiroJID 刷新 8 位动态用水码。"
+                                "shower" -> "可在此页使用手机号与密码直连登录查看余额（可按需隐藏），或配置 shiroJID 刷新 8 位动态用水码。"
                                 "xuexitong" -> "登录后自动汇总作业、签到与课程公告，课表与学习页同步展示。"
                                 else -> if (current == WelcomeStep.READY && !main.loggedIn)
                                     "偏好已保存，接下来可先进入牧野生活或绑定课表账户。" else current.subtitle
@@ -186,6 +187,7 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                                         statusError = life.statusError,
                                         onOpenApp = { IdentityCodeShortcuts.openYixiaoyuan(context) },
                                         onLogin = lifeModel::loginYixiaoyuan,
+                                        onLoginByPassword = lifeModel::loginYixiaoyuanByPassword,
                                         onLogout = lifeModel::logoutYixiaoyuan,
                                         onRefreshBalance = lifeModel::refreshCardBalance,
                                         onRefreshWaterCode = lifeModel::saveShiroJidAndRefresh,
@@ -217,7 +219,7 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                                                 "已配用水码 ${yxy.formattedShowerCode()}（可点此补充登录）"
                                             yxy.hasCredential ->
                                                 "已配 shiroJID · 点此刷新 8 位用水码"
-                                            else -> "支持页内短信登录查余额与配置 8 位用水码"
+                                            else -> "支持页内密码直连登录查余额与配置 8 位用水码"
                                         }
                                         val xxConnected = xuexitong.loggedIn && !xuexitong.sessionExpired
                                         val xxSubtitle = if (xxConnected) {
@@ -244,9 +246,9 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                                             ) { service = "shower" }
                                             SettingsDivider()
                                             SetupAccountItem(
-                                                "超星教务网页（成绩 / 考试 / 空教室）",
+                                                "超星教务（成绩 / 考试 / 空教室）",
                                                 Icons.Outlined.School,
-                                                if (main.jwConnected) "已连接网页会话（Cookie 加密保存）" else "可选网页登录，用于成绩、考试与空教室查询",
+                                                if (main.jwConnected) "已连接教务接口（会话加密保存）" else "使用教务学号密码直连登录，用于成绩、考试与空教室",
                                                 main.jwConnected,
                                                 false,
                                             ) { showJwWebLogin = true }
@@ -328,12 +330,13 @@ fun WelcomeScreen(mainModel: MainViewModel) {
         ProfileEditors(editor, main.settings,
             mainModel.termStartOf(main.settings, main.term ?: TermCalculator.autoTerm()), mainModel) { editor = null }
         if (showJwWebLogin) {
-            ChaoxingWebLoginDialog(
+            ChaoxingDirectLoginDialog(
                 baseUrl = main.settings.baseUrl,
+                initialUsername = mainModel.savedJwUsername(),
                 onDismiss = { showJwWebLogin = false },
-                onCapturedCookies = { cookies ->
+                onLoginSuccess = { user, pwd, cookies ->
                     showJwWebLogin = false
-                    mainModel.onChaoxingWebLoginCaptured(cookies)
+                    mainModel.onChaoxingDirectLoginSuccess(user, pwd, cookies)
                 },
             )
         }
@@ -536,17 +539,15 @@ private fun TeachingSetup(state: MainUiState, model: MainViewModel, xuexitongCon
                     TextButton(onClick = model::skipFirstFetch) { Text("稍后同步") }
                 }
             }
-            TeachingLoginForm(model, if (state.firstFetchFailed) "重新登录并同步" else "登录学习通并同步课表")
-            OutlinedButton(
-                onClick = { showWebLogin = true },
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-            ) {
-                Text("通过超星教务网页登录（用于成绩 / 考试 / 空教室）", color = BrandGreen, fontWeight = FontWeight.SemiBold)
+            TeachingLoginForm(model)
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                TextButton(onClick = { showWebLogin = true }) {
+                    Text("遇到验证码或统一认证？切换网页登录", fontSize = 12.sp, color = InkMid)
+                }
             }
-            SettingsHint("优先使用学习通账号免验证码同步课表与通知；成绩、考试与空教室可在后续通过超星教务网页登录。全部凭据仅加密保存在本机。")
+            SettingsHint("超星教务与学习通均支持纯接口登录，全部凭据与 Cookie 仅加密保存在本机。")
             if (showWebLogin) {
-                com.hmu.muye.data.jw.ChaoxingWebLoginDialog(
+                ChaoxingWebLoginDialog(
                     baseUrl = state.settings.baseUrl,
                     onDismiss = { showWebLogin = false },
                     onCapturedCookies = { cookies ->

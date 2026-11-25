@@ -24,6 +24,13 @@ sealed interface JwFetchResult<out T> {
     data class Error(val message: String) : JwFetchResult<Nothing>
 }
 
+sealed interface JwLoginResult {
+    data class Success(val cookies: String) : JwLoginResult
+    data class InvalidCredentials(val message: String) : JwLoginResult
+    data class NeedWebFallback(val reason: String) : JwLoginResult
+    data class Error(val message: String) : JwLoginResult
+}
+
 /**
  * 超星综合教学管理系统（hnuahe.jw.chaoxing.com）纯 Kotlin 网络客户端。
  *
@@ -53,10 +60,130 @@ class ChaoxingJwClient(
         val encodeId: String,
     )
 
-    /** 校验本地持有的 WebView Cookie 是否仍有效（未重定向回 /admin/login）。 */
+    /**
+     * 纯 HTTP API 学号密码登录：
+     * 1. GET `/admin/login` 获取初始会话 Cookie；
+     * 2. POST `/admin/login` 提交学号与密码表单；
+     * 3. 跟随一次 302 `/admin` 重定向收集完整会话 Cookie（如 `uid` / `yysz`）。
+     * 若服务端要求图形验证码（`jcaptchaError=1`），诚实返回 [JwLoginResult.NeedWebFallback]。
+     */
+    fun loginWithPassword(username: String, password: String): JwLoginResult {
+        val cleanUser = username.trim()
+        if (cleanUser.isBlank() || password.isBlank()) {
+            return JwLoginResult.InvalidCredentials("请输入教务学号和密码")
+        }
+        val cleanBase = baseUrl.trimEnd('/')
+        val loginUrl = "$cleanBase/admin/login"
+        val jar = linkedMapOf<String, String>()
+
+        fun absorbCookies(headers: List<String>) {
+            for (raw in headers) {
+                val nv = raw.substringBefore(';').trim()
+                val eq = nv.indexOf('=')
+                if (eq > 0) {
+                    jar[nv.substring(0, eq).trim()] = nv.substring(eq + 1).trim()
+                }
+            }
+        }
+        fun cookieHeader(): String = jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
+
+        return runCatching {
+            val initReq = Request.Builder()
+                .url(loginUrl)
+                .header("User-Agent", MOBILE_UA)
+                .build()
+            client.newCall(initReq).execute().use { resp ->
+                absorbCookies(resp.headers("Set-Cookie"))
+            }
+
+            val form = FormBody.Builder()
+                .add("username", cleanUser)
+                .add("password", password)
+                .add("vcode", "")
+                .add("jcaptchaCode", "")
+                .add("rememberMe", "1")
+                .build()
+            val postReq = Request.Builder()
+                .url(loginUrl)
+                .header("User-Agent", MOBILE_UA)
+                .header("Origin", cleanBase)
+                .header("Referer", loginUrl)
+                .apply {
+                    val ck = cookieHeader()
+                    if (ck.isNotBlank()) header("Cookie", ck)
+                }
+                .post(form)
+                .build()
+
+            var redirectLocation: String? = null
+            var postBody = ""
+            var postCode = 0
+            client.newCall(postReq).execute().use { resp ->
+                absorbCookies(resp.headers("Set-Cookie"))
+                postCode = resp.code
+                redirectLocation = resp.header("Location")
+                postBody = resp.body?.string().orEmpty()
+            }
+
+            if (postCode in 300..399 && !redirectLocation.isNullOrBlank()) {
+                val loc = redirectLocation!!
+                if (loc.contains("jcaptchaError", ignoreCase = true) ||
+                    loc.contains("captcha", ignoreCase = true)
+                ) {
+                    return@runCatching JwLoginResult.NeedWebFallback("教务系统当前要求图形验证，请点击切换网页完成验证")
+                }
+                if (loc.contains("/admin/login", ignoreCase = true) ||
+                    loc.contains("loginFail", ignoreCase = true)
+                ) {
+                    return@runCatching JwLoginResult.InvalidCredentials("教务登录未通过，请核对学号密码或改用网页登录")
+                }
+                val resolved = if (loc.startsWith("http")) loc else cleanBase + (if (loc.startsWith("/")) loc else "/$loc")
+                val followReq = Request.Builder()
+                    .url(resolved)
+                    .header("User-Agent", MOBILE_UA)
+                    .header("Referer", loginUrl)
+                    .apply {
+                        val ck = cookieHeader()
+                        if (ck.isNotBlank()) header("Cookie", ck)
+                    }
+                    .build()
+                var followOk = false
+                var followLoc: String? = null
+                var followBody = ""
+                client.newCall(followReq).execute().use { resp ->
+                    absorbCookies(resp.headers("Set-Cookie"))
+                    followOk = resp.isSuccessful
+                    followLoc = resp.header("Location")
+                    followBody = resp.body?.string().orEmpty()
+                }
+                if (!followLoc.isNullOrBlank() && followLoc!!.contains("login", ignoreCase = true)) {
+                    return@runCatching JwLoginResult.NeedWebFallback("教务会话未建立，请改用网页登录")
+                }
+                val cookies = cookieHeader()
+                if (followOk && cookies.isNotBlank() && !looksLikeLoginPage(followBody)) {
+                    return@runCatching JwLoginResult.Success(cookies)
+                }
+            }
+
+            val inlineErr = extractLoginError(postBody)
+            if (!inlineErr.isNullOrBlank()) {
+                return@runCatching JwLoginResult.InvalidCredentials(inlineErr)
+            }
+            if (postBody.contains("jcaptchaError", ignoreCase = true) ||
+                postBody.contains("验证码", ignoreCase = false)
+            ) {
+                return@runCatching JwLoginResult.NeedWebFallback("教务系统要求验证码，请点击切换网页完成验证")
+            }
+            JwLoginResult.Error("教务登录未返回有效会话（HTTP $postCode），可切换网页登录")
+        }.getOrElse { e ->
+            JwLoginResult.Error("连接超星教务失败：${e.message ?: "网络异常"}")
+        }
+    }
+
+    /** 校验本地持有的 Cookie 是否仍有效（未重定向回 /admin/login）。 */
     fun verifySession(cookies: String): Boolean {
         if (cookies.isBlank()) return false
-        return getText("/admin/index", cookies, isXhr = false) is HttpFetch.Ok
+        return getText("/admin", cookies, isXhr = false) is HttpFetch.Ok
     }
 
     fun fetchCurrentXnxq(cookies: String): String? {
@@ -64,18 +191,30 @@ class ChaoxingJwClient(
         val resp = getText("/admin/api/jcsj/xnxq/getCurrentXnxq", cookies, isXhr = true)
         if (resp !is HttpFetch.Ok) return null
         return runCatching {
-            JSONObject(resp.body).optJSONObject("data")?.optString("xnxqh")
-                ?.trim()?.takeIf { it.isNotBlank() && it != "null" }
+            val data = JSONObject(resp.body).optJSONObject("data") ?: return@runCatching null
+            listOf("xnxqh", "dataXnxq")
+                .map { data.optString(it).trim() }
+                .firstOrNull { it.isNotBlank() && it != "null" }
         }.getOrNull()
     }
 
-    fun fetchCurrentWeek(cookies: String): Int? {
+    fun fetchCurrentWeek(cookies: String, xnxqHint: String? = null): Int? {
         if (cookies.isBlank()) return null
         val resp = getText("/admin/getCurrentPkZc", cookies, isXhr = true)
         if (resp !is HttpFetch.Ok) return null
-        return runCatching {
-            JSONObject(resp.body).optJSONArray("data")?.optString(0)?.trim()?.toIntOrNull()
-        }.getOrNull()
+        val list = runCatching {
+            val arr = JSONObject(resp.body).optJSONArray("data") ?: return@runCatching emptyList()
+            (0 until arr.length()).mapNotNull { arr.optString(it).trim().toIntOrNull() }
+        }.getOrDefault(emptyList())
+        if (list.size == 1) return list.first()
+
+        val maxWeek = list.maxOrNull()?.coerceIn(1, 30) ?: 20
+        val xnxq = xnxqHint?.takeIf { it.isNotBlank() } ?: fetchCurrentXnxq(cookies)
+        val startDate = xnxq?.let { fetchTermStartDate(cookies, it) }
+        if (startDate != null) {
+            return TermCalculator.weekOf(startDate).coerceIn(1, maxWeek)
+        }
+        return list.firstOrNull()
     }
 
     fun fetchTermStartDate(cookies: String, xnxq: String): LocalDate? {
@@ -216,7 +355,7 @@ class ChaoxingJwClient(
 
         val auto = TermCalculator.autoTerm()
         val xnxq = fetchCurrentXnxq(cookies) ?: "${auto.xnm}-${auto.xnm + 1}-${auto.term}"
-        val week = fetchCurrentWeek(cookies) ?: 1
+        val week = fetchCurrentWeek(cookies, xnxq) ?: 1
 
         // 注意超星教务服务端拼写为 getRommList
         val roomsRes = postForm(
@@ -334,6 +473,12 @@ class ChaoxingJwClient(
             html.contains("/admin/login") ||
                 html.contains("id=\"loginform\"") ||
                 html.contains("jcaptchaCodeChaoxing")
+
+        fun extractLoginError(html: String): String? {
+            if (html.isBlank()) return null
+            val match = Regex("""var\s+error\s*=\s*"([^"]*)"""").find(html)
+            return match?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
+        }
 
         fun extractHiddenInput(html: String, idOrName: String): String {
             val tagRegex = Regex("""<input\b[^>]*>""", RegexOption.IGNORE_CASE)

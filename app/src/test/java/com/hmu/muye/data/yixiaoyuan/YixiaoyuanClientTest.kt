@@ -9,6 +9,9 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.security.KeyPairGenerator
+import java.util.Base64
+import javax.crypto.Cipher
 
 class YixiaoyuanClientTest {
 
@@ -122,5 +125,58 @@ class YixiaoyuanClientTest {
         assertTrue(id, id.startsWith("ym-") && id.length == 35)
         assertTrue(id.removePrefix("ym-").all { it in "0123456789abcdef" })
         assertNotNull(id)
+    }
+
+    @Test
+    fun `login by password fetches public key encrypts with pkcs1 and returns credential`() {
+        val kp = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        val pubB64 = Base64.getEncoder().encodeToString(kp.public.encoded)
+        server.enqueue(
+            MockResponse().setBody(
+                """{"statusCode":0,"message":"操作成功","data":{"publicKey":"$pubB64"},"success":true}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"statusCode":0,"message":"操作成功","success":true,
+                   "data":{"token":"tok-pwd","uuToken":"$uuToken","id":"$ymId","schoolCode":"10469"}}""",
+            ),
+        )
+
+        val result = client.loginByPassword("13800138000", "MockPass!123", deviceId)
+        assertTrue(result is YixiaoyuanResult.Success)
+        val cred = (result as YixiaoyuanResult.Success).data
+        assertEquals("tok-pwd", cred.token)
+        assertEquals(uuToken, cred.uuToken)
+        assertEquals(ymId, cred.ymId)
+        assertEquals("13800138000", cred.mobile)
+
+        val reqKey = server.takeRequest()
+        assertEquals("/login/getPublicKey", reqKey.path)
+
+        val reqLogin = server.takeRequest()
+        assertEquals("/login/doLoginByPwd", reqLogin.path)
+        val loginBody = JSONObject(reqLogin.body.readUtf8())
+        assertEquals("13800138000", loginBody.optString("mobilePhone"))
+        assertEquals("", loginBody.optString("token"))
+
+        val cipherBytes = Base64.getDecoder().decode(loginBody.optString("password"))
+        val decrypted = Cipher.getInstance("RSA/ECB/PKCS1Padding").run {
+            init(Cipher.DECRYPT_MODE, kp.private)
+            String(doFinal(cipherBytes), Charsets.UTF_8)
+        }
+        assertEquals("MockPass!123", decrypted)
+    }
+
+    @Test
+    fun `login by password propagates server error`() {
+        val kp = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        val pubB64 = Base64.getEncoder().encodeToString(kp.public.encoded)
+        server.enqueue(MockResponse().setBody("""{"statusCode":0,"data":{"publicKey":"$pubB64"}}"""))
+        server.enqueue(MockResponse().setBody("""{"statusCode":-1,"message":"密码错误","success":false}"""))
+
+        val result = client.loginByPassword("13800138000", "WrongPass", deviceId)
+        assertTrue(result is YixiaoyuanResult.Error)
+        assertEquals("密码错误", (result as YixiaoyuanResult.Error).message)
     }
 }

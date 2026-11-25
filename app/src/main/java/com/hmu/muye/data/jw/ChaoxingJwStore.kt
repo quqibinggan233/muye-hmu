@@ -19,6 +19,29 @@ class ChaoxingJwStore(context: Context) {
 
     fun hasSession(): Boolean = cookies().isNotBlank()
 
+    fun username(): String = prefs.getString(KEY_USERNAME, null).orEmpty()
+
+    fun password(): String = prefs.getString(KEY_PASSWORD_ENC, null)
+        ?.let { runCatching { Crypto.decrypt(it) }.getOrNull() }
+        .orEmpty()
+
+    fun saveCredentials(username: String, password: String?) {
+        val cleanUser = username.trim()
+        prefs.edit().apply {
+            if (cleanUser.isNotBlank()) putString(KEY_USERNAME, cleanUser)
+            if (!password.isNullOrBlank()) {
+                val enc = runCatching { Crypto.encrypt(password) }.getOrDefault("")
+                if (enc.isNotBlank()) putString(KEY_PASSWORD_ENC, enc)
+            } else {
+                remove(KEY_PASSWORD_ENC)
+            }
+        }.apply()
+    }
+
+    fun clearCredentials() {
+        prefs.edit().remove(KEY_USERNAME).remove(KEY_PASSWORD_ENC).apply()
+    }
+
     fun baseUrl(): String = prefs.getString(KEY_BASE_URL, DEFAULT_JW_BASE)
         ?.takeIf { it.isNotBlank() } ?: DEFAULT_JW_BASE
 
@@ -78,6 +101,8 @@ class ChaoxingJwStore(context: Context) {
         const val DEFAULT_JW_BASE = "https://hnuahe.jw.chaoxing.com"
         private const val PREFS = "hmu_chaoxing_jw"
         private const val KEY_COOKIES_ENC = "cookies_enc"
+        private const val KEY_USERNAME = "username"
+        private const val KEY_PASSWORD_ENC = "password_enc"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_LOGIN_AT = "login_at"
         private const val KEY_GRADES = "grades_json"

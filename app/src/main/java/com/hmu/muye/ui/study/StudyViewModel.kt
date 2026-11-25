@@ -11,6 +11,7 @@ import com.hmu.muye.data.jw.ExamNote
 import com.hmu.muye.data.jw.GpaSummary
 import com.hmu.muye.data.jw.GradeItem
 import com.hmu.muye.data.jw.JwFetchResult
+import com.hmu.muye.data.jw.JwLoginResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -94,6 +95,8 @@ class StudyViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun savedJwUsername(): String = jwStore.username()
+
     fun onWebLoginCaptured(cookies: String) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
@@ -109,12 +112,60 @@ class StudyViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun onDirectLoginSuccess(username: String, password: String?, cookies: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                if (username.isNotBlank()) {
+                    if (!password.isNullOrBlank()) {
+                        jwStore.saveCredentials(username, password)
+                    } else if (jwStore.username() != username) {
+                        jwStore.saveCredentials(username, null)
+                    }
+                }
+                jwStore.saveSession(cookies, jwStore.baseUrl())
+            }
+            _state.update {
+                it.copy(
+                    jwConnected = true,
+                    statusMessage = "超星教务登录成功（会话加密保存在本地）",
+                    statusIsError = false,
+                )
+            }
+        }
+    }
+
+    private fun <T> withAutoJwRelogin(block: (ChaoxingJwClient, String) -> JwFetchResult<T>): JwFetchResult<T> {
+        val baseUrl = jwStore.baseUrl()
+        val client = ChaoxingJwClient(baseUrl)
+        fun tryQuietRelogin(): String? {
+            val u = jwStore.username()
+            val p = jwStore.password()
+            if (u.isBlank() || p.isBlank()) return null
+            return when (val login = client.loginWithPassword(u, p)) {
+                is JwLoginResult.Success -> {
+                    jwStore.saveSession(login.cookies, baseUrl)
+                    login.cookies
+                }
+                else -> null
+            }
+        }
+        val initialCookies = jwStore.cookies().ifBlank { tryQuietRelogin().orEmpty() }
+        val first = block(client, initialCookies)
+        if (first is JwFetchResult.NeedWebLogin) {
+            val renewed = tryQuietRelogin()
+            if (!renewed.isNullOrBlank()) {
+                return block(client, renewed)
+            }
+        }
+        return first
+    }
+
     fun refreshGrades() {
         if (_state.value.busy) return
         _state.update { it.copy(busy = true, statusMessage = null, statusIsError = false) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                ChaoxingJwClient(jwStore.baseUrl()).fetchGrades(jwStore.cookies())
+                withAutoJwRelogin { client, cookies -> client.fetchGrades(cookies) }
             }
             when (result) {
                 is JwFetchResult.Success -> {
@@ -154,7 +205,7 @@ class StudyViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(busy = true, statusMessage = null, statusIsError = false) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                ChaoxingJwClient(jwStore.baseUrl()).fetchExams(jwStore.cookies())
+                withAutoJwRelogin { client, cookies -> client.fetchExams(cookies) }
             }
             when (result) {
                 is JwFetchResult.Success -> {
@@ -217,12 +268,14 @@ class StudyViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(busy = true, statusMessage = null, statusIsError = false) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                ChaoxingJwClient(jwStore.baseUrl()).fetchEmptyRooms(
-                    cookies = jwStore.cookies(),
-                    building = s.buildingQuery,
-                    periodRange = s.periodQuery,
-                    dayOfWeek = s.selectedDayOfWeek,
-                )
+                withAutoJwRelogin { client, cookies ->
+                    client.fetchEmptyRooms(
+                        cookies = cookies,
+                        building = s.buildingQuery,
+                        periodRange = s.periodQuery,
+                        dayOfWeek = s.selectedDayOfWeek,
+                    )
+                }
             }
             when (result) {
                 is JwFetchResult.Success -> {

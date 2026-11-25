@@ -20,6 +20,8 @@ import com.fengkao.timetable.data.update.UpdateChecker
 import com.fengkao.timetable.data.update.UpdateDownloadState
 import com.fengkao.timetable.data.update.UpdateInfo
 import com.fengkao.timetable.widget.WidgetUpdater
+import com.hmu.muye.data.jw.ChaoxingJwClient
+import com.hmu.muye.data.jw.JwLoginResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -253,11 +255,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun savedJwUsername(): String = container.jwStore.username().ifBlank { _state.value.settings.account }
+
     /** 完成超星教务内置 WebView 登录后保存加密 Cookie，并进入主界面或尝试同步。 */
     fun onChaoxingWebLoginCaptured(cookies: String) {
+        onChaoxingDirectLoginSuccess(username = "", password = null, cookies = cookies)
+    }
+
+    /** 完成超星教务纯 API 登录（或网页兜底）后持久化加密账密与会话并尝试同步。 */
+    fun onChaoxingDirectLoginSuccess(username: String, password: String?, cookies: String) {
         viewModelScope.launch {
+            val cleanUser = username.trim()
+            val baseUrl = _state.value.settings.baseUrl
             withContext(Dispatchers.IO) {
-                container.jwStore.saveSession(cookies, _state.value.settings.baseUrl)
+                if (cleanUser.isNotBlank()) {
+                    if (!password.isNullOrBlank()) {
+                        container.jwStore.saveCredentials(cleanUser, password)
+                    } else if (container.jwStore.username() != cleanUser) {
+                        container.jwStore.saveCredentials(cleanUser, null)
+                    }
+                }
+                container.jwStore.saveSession(cookies, baseUrl)
             }
             _state.update {
                 it.copy(
@@ -265,7 +283,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     loggedIn = true,
                     guestMode = true,
                     loginError = null,
-                    syncMessage = "超星教务网页会话已连接",
+                    syncMessage = "超星教务已登录（会话加密保存在本地）",
                 )
             }
             SyncScheduler.ensure(getApplication())
@@ -306,6 +324,63 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ 登录/登出
 
+    /** 清除登录报错（切换教务/学习通登录标签时调用） */
+    fun clearLoginError() = _state.update { it.copy(loginError = null) }
+
+    /** 使用超星教务学号密码纯 HTTP API 登录并同步课表（一次打通课表与成绩/考试/空教室）。 */
+    fun loginJw(username: String, password: String, baseUrl: String, remember: Boolean) {
+        if (_state.value.loginBusy || _state.value.firstFetchActive || _state.value.syncing) return
+        val cleanUser = username.trim()
+        val effectiveBase = baseUrl.trim().removeSuffix("/").ifBlank { _state.value.settings.baseUrl }
+        if (cleanUser.isBlank() || password.isBlank()) {
+            _state.update { it.copy(loginError = "请输入教务学号和密码") }
+            return
+        }
+        _state.update { it.copy(loginBusy = true, loginError = null) }
+        viewModelScope.launch {
+            val auth = withContext(Dispatchers.IO) {
+                ChaoxingJwClient(effectiveBase).loginWithPassword(cleanUser, password)
+            }
+            when (auth) {
+                is JwLoginResult.Success -> {
+                    withContext(Dispatchers.IO) {
+                        container.jwStore.saveCredentials(cleanUser, password.takeIf { remember })
+                        container.jwStore.saveSession(auth.cookies, effectiveBase)
+                    }
+                    container.settings.saveCredentials(cleanUser, null, effectiveBase, remember)
+                    container.cache.clear()
+                    val s = container.settings.first()
+                    val term = TermCalculator.autoTerm(today)
+                    _state.update {
+                        it.copy(
+                            loggedIn = true,
+                            jwConnected = true,
+                            guestMode = false,
+                            loginBusy = false,
+                            settings = s,
+                            term = term,
+                            week = TermCalculator.weekOf(termStartOf(s, term), today).coerceIn(1, s.termWeeks),
+                            firstFetchActive = true,
+                            firstFetchFailed = false,
+                            fetchLogs = emptyList(),
+                        )
+                    }
+                    SyncScheduler.ensure(getApplication())
+                    executeFirstFetch("已连接超星教务，正在同步课表…")
+                }
+                is JwLoginResult.InvalidCredentials -> {
+                    _state.update { it.copy(loginBusy = false, loginError = auth.message) }
+                }
+                is JwLoginResult.NeedWebFallback -> {
+                    _state.update { it.copy(loginBusy = false, loginError = auth.reason) }
+                }
+                is JwLoginResult.Error -> {
+                    _state.update { it.copy(loginBusy = false, loginError = auth.message) }
+                }
+            }
+        }
+    }
+
     fun login(account: String, password: String, baseUrl: String, remember: Boolean) {
         if (_state.value.loginBusy || _state.value.firstFetchActive || _state.value.syncing) return
         val cleanAccount = account.trim()
@@ -341,22 +416,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 com.fengkao.timetable.data.xuexitong.XuexitongNoticeScheduler.ensure(getApplication())
             }
             SyncScheduler.ensure(getApplication())
-            logTo("已登录超星学习通，正在同步课表…")
-            val outcome = doSync(null) { msg -> logTo(msg) }
-            if (outcome is ScheduleRepository.SyncOutcome.Failure) {
-                logTo("获取失败：${outcome.message}")
-                _state.update { it.copy(firstFetchActive = false, firstFetchFailed = true) }
-            } else {
-                // 校历开学日期与作息时间可能在本次同步中自动填入，重算当前周
-                reloadSettings()
-                jumpToday()
-                _state.update { it.copy(firstFetchActive = false, firstFetchFailed = false) }
+            if (executeFirstFetch("已登录超星学习通，正在同步课表…")) {
                 viewModelScope.launch {
                     runCatching { container.xuexitong.refresh() }
                 }
             }
-            refreshWidgets()
         }
+    }
+
+    private suspend fun executeFirstFetch(startLog: String): Boolean {
+        logTo(startLog)
+        val outcome = doSync(null) { msg -> logTo(msg) }
+        val ok = outcome !is ScheduleRepository.SyncOutcome.Failure
+        if (outcome is ScheduleRepository.SyncOutcome.Failure) {
+            logTo("获取失败：${outcome.message}")
+            _state.update { it.copy(firstFetchActive = false, firstFetchFailed = true) }
+        } else {
+            reloadSettings()
+            jumpToday()
+            _state.update { it.copy(firstFetchActive = false, firstFetchFailed = false) }
+        }
+        refreshWidgets()
+        return ok
     }
 
     /** 首次获取失败后重试 */
@@ -364,19 +445,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (_state.value.firstFetchActive) return
         viewModelScope.launch {
             _state.update { it.copy(firstFetchActive = true, firstFetchFailed = false, fetchLogs = emptyList()) }
-            logTo("连接教务系统，登录账号…")
-            // 自动模式：附带校历抓取（同首次登录）
-            val outcome = doSync(null) { msg -> logTo(msg) }
-            if (outcome is ScheduleRepository.SyncOutcome.Failure) {
-                logTo("获取失败：${outcome.message}")
-                _state.update { it.copy(firstFetchActive = false, firstFetchFailed = true) }
-            } else {
-                // 校历开学日期可能在本次同步中自动填入，重算当前周
-                reloadSettings()
-                jumpToday()
-                _state.update { it.copy(firstFetchActive = false, firstFetchFailed = false) }
-            }
-            refreshWidgets()
+            executeFirstFetch("连接课表服务，正在同步…")
         }
     }
 
@@ -391,6 +460,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             container.backgroundSyncError.value = null
             container.settings.logout()
             container.jwStore.clearSession()
+            container.jwStore.clearCredentials()
             container.cache.clear()
             _state.update {
                 MainUiState(
