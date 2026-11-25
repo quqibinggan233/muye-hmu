@@ -61,12 +61,14 @@ import com.fengkao.timetable.ui.water.WaterViewModel
 import com.fengkao.timetable.ui.xuexitong.XuexitongLogin
 import com.fengkao.timetable.ui.xuexitong.XuexitongNotificationPermissionEffect
 import com.fengkao.timetable.ui.xuexitong.XuexitongViewModel
+import com.hmu.muye.data.jw.ChaoxingWebLoginDialog
 import com.hmu.muye.data.parcel.IdentityCodeShortcuts
+import com.hmu.muye.ui.life.LifeViewModel
 
 private enum class WelcomeStep(val label: String, val title: String, val subtitle: String) {
     INTRO("欢迎", "欢迎使用牧野生活", "HMU 校园大小事，一站搞定"),
-    TEACHING("教务", "连接超星教务", "支持超星综合教学管理（hnuahe.jw.chaoxing.com）网页登录或稍后在「学习」页绑定。"),
-    SERVICES("服务", "连接校园服务", "喝水（慧生活798）、学习通及更多龙子湖服务可在「生活/学习」页随时绑定。"),
+    TEACHING("课表", "登录学习通同步课表", "登录一次学习通即可同时同步课表与课程通知；如需查成绩、考试或空教室，也可点下方超星教务网页登录。"),
+    SERVICES("服务", "连接校园服务", "喝水（慧生活 798）、易校园、超星教务与学习通可在此配置，也可稍后在「生活 / 我的」绑定。"),
     PREFERENCES("偏好", "按你的习惯看课表", "调整常用设置，之后也能在“我的”里修改。"),
     READY("完成", "设置好了", "你的牧野生活，准备就绪。"),
 }
@@ -78,16 +80,19 @@ fun WelcomeScreen(mainModel: MainViewModel) {
     // Same activity-scoped models as the bottom navigation and account settings.
     val waterModel: WaterViewModel = viewModel()
     val xuexitongModel: XuexitongViewModel = viewModel()
+    val lifeModel: LifeViewModel = viewModel()
     val water by waterModel.state.collectAsStateWithLifecycle()
     val xuexitong by xuexitongModel.state.collectAsStateWithLifecycle()
+    val life by lifeModel.state.collectAsStateWithLifecycle()
     XuexitongNotificationPermissionEffect(xuexitongModel)
     var step by rememberSaveable { mutableIntStateOf(main.settings.welcomeStep) }
     var service by rememberSaveable { mutableStateOf<String?>(null) }
     var editor by rememberSaveable { mutableStateOf<String?>(null) }
+    var showJwWebLogin by rememberSaveable { mutableStateOf(false) }
     val holder = rememberSaveableStateHolder()
     val keyboard = LocalSoftwareKeyboardController.current
     val busy = main.loginBusy || main.firstFetchActive || main.welcomeSaving ||
-        water.busy || xuexitong.busy
+        water.busy || xuexitong.busy || life.yixiaoyuanBusy
 
     fun go(next: Int) {
         keyboard?.hide()
@@ -99,6 +104,14 @@ fun WelcomeScreen(mainModel: MainViewModel) {
         keyboard?.hide()
         if (!main.loginBusy && !main.firstFetchActive && !main.welcomeSaving) {
             if (service != null) service = null else go(step - 1)
+        }
+    }
+    LaunchedEffect(main.loggedIn, main.firstFetchActive, main.schedule, step) {
+        xuexitongModel.reloadFromRepository()
+    }
+    LaunchedEffect(xuexitong.loggedIn) {
+        if (xuexitong.loggedIn) {
+            mainModel.syncAuthStateFromRepositories(autoSyncSchedule = true)
         }
     }
     LaunchedEffect(water.loggedIn, xuexitong.loggedIn) {
@@ -150,10 +163,10 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                             },
                             subtitle = when (page) {
                                 "water" -> "使用慧生活798账户，登录后可绑定龙子湖饮水设备。"
-                                "shower" -> "龙子湖浴室采用易校园 8 位动态用水码，无需蓝牙连接，也不使用趣智校园登录。"
+                                "shower" -> "可在此页直接短信登录查看一卡通余额（可按需隐藏），或配置 shiroJID 刷新 8 位动态用水码。"
                                 "xuexitong" -> "登录后自动汇总作业、签到与课程公告，课表与学习页同步展示。"
                                 else -> if (current == WelcomeStep.READY && !main.loggedIn)
-                                    "偏好已保存，接下来可先进入牧野生活或绑定超星教务。" else current.subtitle
+                                    "偏好已保存，接下来可先进入牧野生活或绑定课表账户。" else current.subtitle
                             },
                             isService = page == "water" || page == "shower" || page == "xuexitong",
                         ) {
@@ -163,33 +176,22 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                                     ServiceMessage(water.message, water.error)
                                 }
                                 "shower" -> {
-                                    LifeCard {
-                                        Text(
-                                            "易校园 · 余额与 8 位动态用水码",
-                                            fontSize = 18.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = InkDark,
-                                        )
-                                        Spacer(Modifier.height(8.dp))
-                                        Text(
-                                            "进入主界面后可在「生活」页或「我的 → 校园服务账户」提交短信验证码登录查看一卡通余额（可按需隐藏余额卡），并配置 shiroJID 自动刷新 8 位动态用水码或一键跳转官方 App。",
-                                            fontSize = 13.sp,
-                                            lineHeight = 20.sp,
-                                            color = InkMid,
-                                        )
-                                        Spacer(Modifier.height(16.dp))
-                                        Button(
-                                            onClick = { IdentityCodeShortcuts.openYixiaoyuan(context) },
-                                            modifier = Modifier.fillMaxWidth().height(48.dp),
-                                            shape = RoundedCornerShape(14.dp),
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = BrandGreen,
-                                                contentColor = Color.White,
-                                            ),
-                                        ) {
-                                            Text("一键打开易校园 App", fontWeight = FontWeight.SemiBold)
-                                        }
-                                    }
+                                    YixiaoyuanAccountPage(
+                                        state = life.yixiaoyuan,
+                                        signedIn = life.yixiaoyuanSignedIn,
+                                        savedMobile = life.yixiaoyuanMobile,
+                                        busy = life.yixiaoyuanBusy,
+                                        waterCode = life.waterCodeInfo,
+                                        statusMessage = life.statusMessage,
+                                        statusError = life.statusError,
+                                        onOpenApp = { IdentityCodeShortcuts.openYixiaoyuan(context) },
+                                        onLogin = lifeModel::loginYixiaoyuan,
+                                        onLogout = lifeModel::logoutYixiaoyuan,
+                                        onRefreshBalance = lifeModel::refreshCardBalance,
+                                        onRefreshWaterCode = lifeModel::saveShiroJidAndRefresh,
+                                        onToggleShowBalance = lifeModel::setShowYixiaoyuanBalance,
+                                        onSave = lifeModel::saveYixiaoyuanConfig,
+                                    )
                                 }
                                 "xuexitong" -> {
                                     XuexitongLogin(xuexitong, xuexitongModel, showHeading = false, submitLabel = "登录学习通")
@@ -197,23 +199,73 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                                 }
                                 else -> when (current) {
                                     WelcomeStep.INTRO -> WelcomeIntro()
-                                    WelcomeStep.TEACHING -> TeachingSetup(main, mainModel)
+                                    WelcomeStep.TEACHING -> TeachingSetup(
+                                        state = main,
+                                        model = mainModel,
+                                        xuexitongConnected = xuexitong.loggedIn && !xuexitong.sessionExpired,
+                                    )
                                     WelcomeStep.SERVICES -> {
+                                        val yxy = life.yixiaoyuan
+                                        val yxyConfigured = life.yixiaoyuanSignedIn || yxy.hasCredential ||
+                                            yxy.showerCode.isNotBlank() || yxy.cardBalanceYuan != null
+                                        val yxySubtitle = when {
+                                            life.yixiaoyuanSignedIn && yxy.showBalanceCard && yxy.cardBalanceYuan != null ->
+                                                "已登录 · 余额 ¥%.2f（可点此配置用水码）".format(yxy.cardBalanceYuan)
+                                            life.yixiaoyuanSignedIn ->
+                                                "已登录 · ${maskAccount(life.yixiaoyuanMobile)}"
+                                            yxy.showerCode.isNotBlank() ->
+                                                "已配用水码 ${yxy.formattedShowerCode()}（可点此补充登录）"
+                                            yxy.hasCredential ->
+                                                "已配 shiroJID · 点此刷新 8 位用水码"
+                                            else -> "支持页内短信登录查余额与配置 8 位用水码"
+                                        }
+                                        val xxConnected = xuexitong.loggedIn && !xuexitong.sessionExpired
+                                        val xxSubtitle = if (xxConnected) {
+                                            "已同步课表与通知 · ${maskAccount(xuexitong.phone)}"
+                                        } else {
+                                            "自动汇总作业、签到与课程公告（课表共用此账号）"
+                                        }
                                         SettingsSection {
-                                            SetupAccountItem("喝水账户", Icons.Outlined.WaterDrop,
+                                            SetupAccountItem(
+                                                "喝水账户",
+                                                Icons.Outlined.WaterDrop,
                                                 if (water.loggedIn) maskAccount(water.phone) else "慧生活798 · 连接饮水设备",
-                                                water.loggedIn, water.busy) { service = "water" }
+                                                water.loggedIn,
+                                                water.busy,
+                                            ) { service = "water" }
                                             SettingsDivider()
-                                            SetupAccountItem("易校园（洗澡 / 一卡通）", Icons.Outlined.Shower,
-                                                "8 位动态用水码 · 一卡通余额按需显示",
-                                                false, false) { service = "shower" }
+                                            SetupAccountItem(
+                                                "易校园（洗澡 / 一卡通）",
+                                                Icons.Outlined.Shower,
+                                                yxySubtitle,
+                                                yxyConfigured,
+                                                life.yixiaoyuanBusy,
+                                                allowReopen = true,
+                                            ) { service = "shower" }
                                             SettingsDivider()
-                                            SetupAccountItem("学习通账户", Icons.Outlined.Notifications,
-                                                if (xuexitong.loggedIn) maskAccount(xuexitong.phone) else "自动汇总作业、签到与课程公告",
-                                                xuexitong.loggedIn && !xuexitong.sessionExpired, xuexitong.busy) { service = "xuexitong" }
+                                            SetupAccountItem(
+                                                "超星教务网页（成绩 / 考试 / 空教室）",
+                                                Icons.Outlined.School,
+                                                if (main.jwConnected) "已连接网页会话（Cookie 加密保存）" else "可选网页登录，用于成绩、考试与空教室查询",
+                                                main.jwConnected,
+                                                false,
+                                            ) { showJwWebLogin = true }
+                                            SettingsDivider()
+                                            SetupAccountItem(
+                                                "学习通账户",
+                                                Icons.Outlined.Notifications,
+                                                xxSubtitle,
+                                                xxConnected,
+                                                xuexitong.busy,
+                                            ) { service = "xuexitong" }
                                         }
                                     }
                                     WelcomeStep.PREFERENCES -> {
+                                        val termWeeksSubtitle = when {
+                                            main.settings.termWeeksManual -> "已手动调整"
+                                            main.schedule != null -> "已按课表有课周数自动识别"
+                                            else -> "同步课表后将自动识别有课周数"
+                                        }
                                         SettingsSection {
                                             SettingsSwitchItem("显示周末", Icons.Outlined.DateRange,
                                                 "显示周六、周日", main.settings.showWeekend,
@@ -227,20 +279,36 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                                             SettingsItem("第一周第一天", Icons.Outlined.Event,
                                                 value = mainModel.termStartOf(main.settings, term).toString(), divider = true, valueColor = InkMid) { editor = "date" }
                                             SettingsItem("学期周数", Icons.Outlined.CalendarMonth,
+                                                subtitle = termWeeksSubtitle,
                                                 value = "${main.settings.termWeeks} 周", divider = true, valueColor = InkMid) { editor = "weeks" }
                                             SettingsItem("上课时间", Icons.Outlined.Schedule,
                                                 "查看并调整每一节课的时间") { editor = "periods" }
                                         }
-                                        if (main.settings.passwordEnc.isBlank())
-                                            SettingsHint("登录教务账户时勾选“记住密码”，即可使用自动更新。")
+                                        if (!main.loggedIn) {
+                                            SettingsHint("完成登录并开启自动更新后，应用将在后台定期同步最新课表。")
+                                        }
                                     }
                                     WelcomeStep.READY -> {
+                                        val xxOk = xuexitong.loggedIn && !xuexitong.sessionExpired
+                                        val yxy = life.yixiaoyuan
+                                        val yxyOk = life.yixiaoyuanSignedIn || yxy.hasCredential || yxy.showerCode.isNotBlank()
+                                        val yxyStatus = when {
+                                            life.yixiaoyuanSignedIn -> "已登录"
+                                            yxy.showerCode.isNotBlank() || yxy.hasCredential -> "已配用水码"
+                                            else -> "可稍后配置"
+                                        }
+                                        val courseStatus = when {
+                                            main.schedule != null -> "已同步 ${main.schedule!!.courses.size} 节"
+                                            main.loggedIn -> "已登录"
+                                            else -> "稍后登录"
+                                        }
                                         ReadyMark()
                                         SettingsSection("账户连接") {
-                                            SetupStatus("教务 / 学习通课表", if (main.loggedIn) "已保存" else "稍后登录", main.loggedIn)
+                                            SetupStatus("课程表", courseStatus, main.loggedIn || main.schedule != null)
+                                            SetupStatus("学习通通知", if (xxOk) "已连接" else "稍后登录", xxOk)
+                                            SetupStatus("超星教务（成绩 / 考试）", if (main.jwConnected) "已连接" else "可稍后登录", main.jwConnected)
                                             SetupStatus("喝水账户", if (water.loggedIn) "已登录" else "稍后登录", water.loggedIn)
-                                            SetupStatus("易校园（洗澡 / 一卡通）", "支持直达 App 与本地记码", false)
-                                            SetupStatus("学习通通知", if (xuexitong.loggedIn) "已登录" else "稍后登录", xuexitong.loggedIn && !xuexitong.sessionExpired)
+                                            SetupStatus("易校园（洗澡 / 一卡通）", yxyStatus, yxyOk)
                                         }
                                         SettingsSection("课表偏好") {
                                             SettingsValue("显示周末", if (main.settings.showWeekend) "开启" else "关闭", InkMid)
@@ -259,6 +327,16 @@ fun WelcomeScreen(mainModel: MainViewModel) {
 
         ProfileEditors(editor, main.settings,
             mainModel.termStartOf(main.settings, main.term ?: TermCalculator.autoTerm()), mainModel) { editor = null }
+        if (showJwWebLogin) {
+            ChaoxingWebLoginDialog(
+                baseUrl = main.settings.baseUrl,
+                onDismiss = { showJwWebLogin = false },
+                onCapturedCookies = { cookies ->
+                    showJwWebLogin = false
+                    mainModel.onChaoxingWebLoginCaptured(cookies)
+                },
+            )
+        }
     }
 }
 
@@ -419,7 +497,7 @@ private fun WelcomeFeature(title: String, detail: String, icon: ImageVector) {
 }
 
 @Composable
-private fun TeachingSetup(state: MainUiState, model: MainViewModel) {
+private fun TeachingSetup(state: MainUiState, model: MainViewModel, xuexitongConnected: Boolean) {
     when {
         state.firstFetchActive -> LifeCard {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -427,16 +505,22 @@ private fun TeachingSetup(state: MainUiState, model: MainViewModel) {
                 Text("正在登录并同步课程", color = InkDark, fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.height(12.dp))
-            Text(state.fetchLogs.lastOrNull() ?: "正在连接教务系统…", color = InkMid, fontSize = 13.sp, lineHeight = 20.sp)
+            Text(state.fetchLogs.lastOrNull() ?: "正在连接课表服务…", color = InkMid, fontSize = 13.sp, lineHeight = 20.sp)
         }
         state.loggedIn && !state.firstFetchFailed -> {
+            val heading = when {
+                xuexitongConnected && state.jwConnected -> "学习通与超星教务已连接"
+                xuexitongConnected -> "学习通已连接（课表与通知共用）"
+                state.jwConnected -> "超星教务已连接"
+                else -> "课表账户已保存"
+            }
+            val accountLabel = state.schedule?.student?.name?.takeIf { it.isNotBlank() }
+                ?: maskAccount(state.settings.account).ifBlank { "网页会话" }
             LifeCard {
                 Icon(Icons.Outlined.CheckCircle, null, tint = BrandGreen, modifier = Modifier.size(36.dp))
                 Spacer(Modifier.height(12.dp))
-                Text(if (state.schedule != null) "教务账户已连接" else "教务账户已保存",
-                    color = InkDark, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                Text(state.schedule?.student?.name?.takeIf { it.isNotBlank() } ?: maskAccount(state.settings.account),
-                    color = InkMid, modifier = Modifier.padding(top = 6.dp))
+                Text(heading, color = InkDark, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(accountLabel, color = InkMid, modifier = Modifier.padding(top = 6.dp))
                 Text(if (state.schedule != null) "课表已同步，点击下一步继续设置。" else "稍后可在“我的 → 同步与数据”中获取课程。",
                     color = InkGray, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 8.dp))
             }
@@ -477,8 +561,8 @@ private fun TeachingSetup(state: MainUiState, model: MainViewModel) {
 
 @Composable
 private fun SetupAccountItem(title: String, icon: ImageVector, subtitle: String,
-    connected: Boolean, busy: Boolean, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(enabled = !connected && !busy, onClick = onClick).padding(16.dp),
+    connected: Boolean, busy: Boolean, allowReopen: Boolean = false, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(enabled = (!connected || allowReopen) && !busy, onClick = onClick).padding(16.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Icon(icon, null, tint = BrandGreen, modifier = Modifier.size(26.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {

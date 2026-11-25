@@ -135,6 +135,9 @@ fun MainScaffold(viewModel: MainViewModel) {
     val studyModel: StudyViewModel = viewModel()
     val lifeModel: LifeViewModel = viewModel()
     com.fengkao.timetable.ui.xuexitong.XuexitongNotificationPermissionEffect(xuexitongModel)
+    LaunchedEffect(state.loggedIn, state.firstFetchActive, state.settings.account) {
+        xuexitongModel.reloadFromRepository()
+    }
     val tabStateHolder = rememberSaveableStateHolder()
     val backdrop = rememberLayerBackdrop()
     // 画布排课模式：底栏让位，否则会压住底部的排课表单（demo 也是这么处理的）

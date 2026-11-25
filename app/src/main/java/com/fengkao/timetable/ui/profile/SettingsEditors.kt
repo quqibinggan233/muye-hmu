@@ -37,13 +37,57 @@ internal fun ProfileEditors(editor: String?, settings: AppSettings, start: Local
     }
     if (editor == "periods") PeriodEditorDialog(settings.periodTimes(), dismiss) { model.setPeriodTimes(it); dismiss() }
     if (editor == "weeks") {
-        var value by rememberSaveable { mutableStateOf(settings.termWeeks.toString()) }
+        var value by rememberSaveable(settings.termWeeks) { mutableStateOf(settings.termWeeks.toString()) }
         var error by remember { mutableStateOf(false) }
-        AlertDialog(onDismissRequest = dismiss, title = { Text("学期周数") }, text = {
-            OutlinedTextField(value, { value = it; error = false }, singleLine = true, label = { Text("4–30 周") }, isError = error,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), supportingText = { if (error) Text("请输入 4–30 的整数") })
-        }, confirmButton = { TextButton(onClick = { val weeks = value.toIntOrNull(); if (weeks != null && weeks in 4..30) { model.setTermWeeks(weeks); dismiss() } else error = true }) { Text("保存") } },
-            dismissButton = { TextButton(onClick = dismiss) { Text("取消") } }, containerColor = CardWhite)
+        val inferred = model.inferredTermWeeksFromSchedule()
+        AlertDialog(
+            onDismissRequest = dismiss,
+            title = { Text("学期周数") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value,
+                        { value = it; error = false },
+                        singleLine = true,
+                        label = { Text("4–30 周") },
+                        isError = error,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        supportingText = {
+                            when {
+                                error -> Text("请输入 4–30 的整数")
+                                inferred != null -> Text(
+                                    "当前课表有课至第 $inferred 周（${if (settings.termWeeksManual) "当前为手动设置" else "已自动识别"}）"
+                                )
+                            }
+                        },
+                    )
+                    if (inferred != null && (settings.termWeeksManual || settings.termWeeks != inferred)) {
+                        TextButton(
+                            onClick = {
+                                model.resetTermWeeksAuto()
+                                dismiss()
+                            },
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        ) {
+                            Text("按课表自动识别（$inferred 周）", color = BrandGreen, fontSize = 13.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val weeks = value.toIntOrNull()
+                    if (weeks != null && weeks in 4..30) {
+                        model.setTermWeeks(weeks)
+                        dismiss()
+                    } else {
+                        error = true
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = dismiss) { Text("取消") } },
+            containerColor = CardWhite,
+        )
     }
     if (editor == "theme") {
         AlertDialog(onDismissRequest = dismiss, title = { Text("外观") }, text = {

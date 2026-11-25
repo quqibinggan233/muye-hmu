@@ -137,10 +137,15 @@ fun ProfileScreen(
                     SettingsSection { SettingsItem("管理已添加课程", Icons.AutoMirrored.Outlined.List) { go(ProfilePage.COURSES) } }
                 }
                 ProfilePage.TERM -> {
+                    val termWeeksSubtitle = when {
+                        s.termWeeksManual -> "已手动调整"
+                        state.schedule != null -> "已按课表有课周数自动识别"
+                        else -> "同步课表后将自动识别有课周数"
+                    }
                     SettingsSection {
                         SettingsValue("当前学期", term.label)
                         SettingsItem("第一周第一天", Icons.Outlined.Event, value = start.toString(), divider = true) { editor = "date" }
-                        SettingsItem("学期周数", Icons.Outlined.DateRange, value = "${s.termWeeks} 周") { editor = "weeks" }
+                        SettingsItem("学期周数", Icons.Outlined.DateRange, subtitle = termWeeksSubtitle, value = "${s.termWeeks} 周") { editor = "weeks" }
                     }
                     SettingsHint(weekText)
                 }

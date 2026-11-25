@@ -60,13 +60,10 @@ class ScheduleRepository(
                 if (payload.termStartDate != null && !s.hasTermStartFor(payload.term)) {
                     settings.setTermStartEpochDay(payload.termStartDate.toEpochDay(), payload.term)
                 }
-                if (payload.maxWeek in 1..30 && payload.maxWeek != s.termWeeks) {
-                    settings.setTermWeeks(payload.maxWeek)
-                }
                 if (s.periodTimesJson.isBlank() && payload.periodTimes.isNotEmpty()) {
                     settings.setPeriodTimes(payload.periodTimes)
                 }
-                return@withContext commitSchedule(payload.schedule, payload.term, onLog)
+                return@withContext commitSchedule(payload.schedule, payload.term, onLog, fallbackMaxWeek = payload.maxWeek)
             }.onFailure { err ->
                 if (cookies.isBlank()) {
                     return@withContext SyncOutcome.Failure(err.message ?: "学习通课表同步失败")
@@ -123,6 +120,7 @@ class ScheduleRepository(
         schedule: CachedSchedule,
         candidate: TermSpec,
         onLog: (String) -> Unit,
+        fallbackMaxWeek: Int? = null,
     ): SyncOutcome {
         if (schedule.courses.isEmpty()) {
             return SyncOutcome.Failure("该学期暂无课表数据，已保留上次成功获取的课程")
@@ -140,6 +138,14 @@ class ScheduleRepository(
         }
         val isLatest = cache.save(schedule)
         if (isLatest) {
+            val s = settings.first()
+            val inferredWeeks = TermCalculator.inferTermWeeks(schedule.courses, fallbackMaxWeek)
+            val termChanged = s.lastXnm > 0 && (s.lastXnm != candidate.xnm || s.lastTerm != candidate.term)
+            if (inferredWeeks != null && (!s.termWeeksManual || termChanged) &&
+                (inferredWeeks != s.termWeeks || s.termWeeksManual)
+            ) {
+                settings.setTermWeeks(inferredWeeks, manual = false)
+            }
             changes.save(detected)
             settings.setLastSync(candidate.xnm, candidate.term, now)
         }

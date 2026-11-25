@@ -110,6 +110,14 @@ class XuexitongViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(message = null, error = false) }
     }
 
+    /** 重新从本地仓库同步登录状态与已拉取的通知（如首页主登录流刚登录学习通后触发）。 */
+    fun reloadFromRepository() {
+        syncState()
+        if (repository.hasSession() && repository.notifyEnabled()) {
+            XuexitongNoticeScheduler.ensure(getApplication())
+        }
+    }
+
     /** 进入首页时调用：缓存够新就不打网络，避免每次启动都登录/抓取。 */
     fun enter() {
         if (!repository.hasSession() || _state.value.busy) return

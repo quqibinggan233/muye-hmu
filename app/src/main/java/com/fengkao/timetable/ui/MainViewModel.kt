@@ -187,6 +187,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Keep showing the last good semester until the new one has actual courses.
         val schedule = listOfNotNull(currentCache?.takeIf { it.courses.isNotEmpty() }, cached)
             .maxWithOrNull(compareBy { schedule: CachedSchedule -> TermSpec(schedule.xnm, schedule.term).rank })
+        if (!s.termWeeksManual && schedule != null) {
+            val inferred = TermCalculator.inferTermWeeks(schedule.courses)
+            if (inferred != null && inferred != s.termWeeks) {
+                container.settings.setTermWeeks(inferred, manual = false)
+                s = container.settings.first()
+            }
+        }
         val term = schedule?.let { TermSpec(it.xnm, it.term) } ?: calendarTerm
         val jwConnected = container.jwStore.hasSession()
         val xxConnected = container.xuexitong.hasSession()
@@ -222,6 +229,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 允许跳过教务登录，先进入牧野生活 4 Tab 主界面（后续可随时在「学习/我的」登录超星教务）。 */
     fun enterWithoutTeachingLogin() = _state.update { it.copy(guestMode = true, loginError = null) }
+
+    /** 从服务仓库重新同步登录态（如在引导页或个人页通过独立学习通表单登录后触发）。 */
+    fun syncAuthStateFromRepositories(autoSyncSchedule: Boolean = false) {
+        viewModelScope.launch {
+            val s = container.settings.first()
+            val jwConnected = container.jwStore.hasSession()
+            val xxConnected = container.xuexitong.hasSession()
+            val hasAuth = s.account.isNotBlank() || jwConnected || xxConnected
+            _state.update {
+                it.copy(
+                    loggedIn = hasAuth,
+                    jwConnected = jwConnected,
+                    guestMode = s.welcomeCompleted && !hasAuth,
+                )
+            }
+            if (hasAuth) {
+                SyncScheduler.ensure(getApplication())
+                if (autoSyncSchedule && _state.value.schedule == null && (jwConnected || xxConnected)) {
+                    sync()
+                }
+            }
+        }
+    }
 
     /** 完成超星教务内置 WebView 登录后保存加密 Cookie，并进入主界面或尝试同步。 */
     fun onChaoxingWebLoginCaptured(cookies: String) {
@@ -306,6 +336,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     week = TermCalculator.weekOf(termStartOf(s, term), today).coerceIn(1, s.termWeeks),
                     firstFetchActive = true, firstFetchFailed = false, fetchLogs = emptyList(),
                 )
+            }
+            if (container.xuexitong.notifyEnabled()) {
+                com.fengkao.timetable.data.xuexitong.XuexitongNoticeScheduler.ensure(getApplication())
             }
             SyncScheduler.ensure(getApplication())
             logTo("已登录超星学习通，正在同步课表…")
@@ -512,10 +545,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 从当前缓存课表推断有课的最大周数 */
+    fun inferredTermWeeksFromSchedule(): Int? =
+        _state.value.schedule?.let { TermCalculator.inferTermWeeks(it.courses) }
+
+    /** 恢复按课表实际有课周数自动识别 */
+    fun resetTermWeeksAuto() {
+        val inferred = inferredTermWeeksFromSchedule() ?: return
+        viewModelScope.launch {
+            container.settings.setTermWeeks(inferred, manual = false)
+            reloadSettings()
+            jumpToday()
+        }
+    }
+
     /** 学期周数（4..30），调整后回到“当前周” */
     fun setTermWeeks(weeks: Int) {
         viewModelScope.launch {
-            container.settings.setTermWeeks(weeks)
+            container.settings.setTermWeeks(weeks, manual = true)
             reloadSettings()
             jumpToday()
         }

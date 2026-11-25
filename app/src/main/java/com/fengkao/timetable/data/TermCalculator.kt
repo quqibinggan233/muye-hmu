@@ -1,5 +1,6 @@
 package com.fengkao.timetable.data
 
+import com.fengkao.timetable.data.model.CourseBlock
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
@@ -56,6 +57,17 @@ object TermCalculator {
 
     fun weekStart(termStart: LocalDate, week: Int): LocalDate =
         termStart.plusDays(((week - 1) * 7L).coerceAtLeast(0))
+
+    /** 按课表实际有课的最大周次推断学期总周数（夹取到 4..30）；无有效周次时回退服务端周数。 */
+    fun inferTermWeeks(courses: List<CourseBlock>, fallbackMaxWeek: Int? = null): Int? {
+        val maxCourseWeek = courses
+            .asSequence()
+            .flatMap { it.weeks.asSequence() }
+            .filter { it in 1..30 }
+            .maxOrNull()
+        return maxCourseWeek?.coerceIn(4, 30)
+            ?: fallbackMaxWeek?.takeIf { it in 1..30 }?.coerceIn(4, 30)
+    }
 
     /** 学年学期下拉可选项 */
     fun selectableTerms(center: TermSpec): List<TermSpec> = buildList {

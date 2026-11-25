@@ -48,6 +48,8 @@ data class AppSettings(
     val periodTimesJson: String = "",
     /** 学期总周数（默认 16 周） */
     val termWeeks: Int = 16,
+    /** 学期周数是否由用户手动调整（为 true 时同课表同步不再自动覆盖，切到新学期时自动重置） */
+    val termWeeksManual: Boolean = false,
     /** 课表是否显示周六周日（默认开） */
     val showWeekend: Boolean = true,
     /** 本地隐藏的课程（stableKey 集合，仅影响显示，不影响同步数据） */
@@ -121,6 +123,7 @@ class SettingsStore(private val context: Context) {
         val lastSyncAt = longPreferencesKey("last_sync_at")
         val periodTimes = stringPreferencesKey("period_times_json")
         val termWeeks = intPreferencesKey("term_weeks")
+        val termWeeksManual = booleanPreferencesKey("term_weeks_manual")
         val showWeekend = booleanPreferencesKey("show_weekend")
         val hiddenCourses = stringPreferencesKey("hidden_courses_json")
         val nameOverrides = stringPreferencesKey("name_overrides_json")
@@ -155,6 +158,7 @@ class SettingsStore(private val context: Context) {
             lastSyncAt = p[Keys.lastSyncAt] ?: 0L,
             periodTimesJson = p[Keys.periodTimes].orEmpty(),
             termWeeks = (p[Keys.termWeeks] ?: 16).coerceIn(4, 30),
+            termWeeksManual = p[Keys.termWeeksManual] ?: false,
             showWeekend = p[Keys.showWeekend] ?: true,
             hiddenCourses = p[Keys.hiddenCourses]
                 ?.let { raw -> runCatching { json.decodeFromString(HIDDEN_SERIALIZER, raw) }.getOrNull() }
@@ -265,8 +269,9 @@ class SettingsStore(private val context: Context) {
         it[Keys.periodTimes] = json.encodeToString(ListSerializer(PeriodTime.serializer()), list)
     }
 
-    suspend fun setTermWeeks(weeks: Int) = context.dataStore.edit {
+    suspend fun setTermWeeks(weeks: Int, manual: Boolean = true) = context.dataStore.edit {
         it[Keys.termWeeks] = weeks.coerceIn(4, 30)
+        it[Keys.termWeeksManual] = manual
     }
 
     suspend fun setShowWeekend(value: Boolean) = context.dataStore.edit {
