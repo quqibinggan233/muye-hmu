@@ -145,6 +145,10 @@ class XuexitongApi(
             .map { text(item, it) }
             .firstOrNull { it.isNotBlank() }
             ?: hashOf("$title|$timeText|$sender")
+        val numericNoticeId = listOf("id", "noticeId", "noticeid", "notice_id", "noticeID")
+            .map { text(item, it).trim() }
+            .mapNotNull { it.toIntOrNull() }
+            .firstOrNull { it > 0 }
         val attachment = parseAttachment(text(item, "attachment"))
         return XuexitongNotice(
             id = id,
@@ -160,6 +164,7 @@ class XuexitongApi(
             attachmentUrl = attachment?.url.orEmpty(),
             attachmentKind = attachment?.kind.orEmpty(),
             attachmentSize = attachment?.size.orEmpty(),
+            numericNoticeId = numericNoticeId,
         )
     }
 

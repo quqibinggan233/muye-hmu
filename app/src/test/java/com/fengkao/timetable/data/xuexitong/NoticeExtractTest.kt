@@ -184,6 +184,22 @@ class NoticeExtractTest {
         assertTrue("跨 118 天的自主考试应标记长窗口", item.longWindow)
     }
 
+    @Test
+    fun `课堂教学评价归类为EVALUATION与任务分开统计`() {
+        val eval = notice(
+            "ev1",
+            "作业通知",
+            "课程名称：生物化学\n作业名称：课堂教学学生评价表 - 理论课（5星评分版）\n结束时间：2026-11-26 16:10:00",
+            "work",
+            attachment = "课堂教学学生评价表 - 理论课（5星评分版）",
+            url = "https://mooc1-api.chaoxing.com/examApi/intoexamorwork?taskrefId=88001",
+        )
+        assertEquals(NoticeCategory.EVALUATION, eval.category)
+        val task = NoticeExtract.buildTasks(listOf(eval), now = 0L).single()
+        assertEquals(TaskKind.EVALUATION, task.kind)
+        assertEquals("生物化学", task.courseName)
+    }
+
     // ------------------------------------------------------------ 课表异动
 
     /** 真实公告：《数据库原理》调课通知（2026-09-22 21:08），明天=9月23日。 */

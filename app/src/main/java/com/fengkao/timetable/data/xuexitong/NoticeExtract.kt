@@ -14,6 +14,7 @@ import java.util.UUID
 enum class TaskKind(val label: String) {
     HOMEWORK("作业"),
     EXAM("考试"),
+    EVALUATION("评价"),
 }
 
 enum class TaskStatus { URGENT, OPEN, CLOSED, UNDATED }
@@ -124,9 +125,11 @@ object NoticeExtract {
         return rest.substringBefore('&').substringBefore('#').trim()
     }
 
-    private fun kindOf(notice: XuexitongNotice): TaskKind? = when (notice.attachmentKind) {
-        "work" -> TaskKind.HOMEWORK
-        "exam" -> TaskKind.EXAM
+    private fun kindOf(notice: XuexitongNotice): TaskKind? = when {
+        NoticeFormat.isEvaluation(notice.title, notice.content, notice.attachmentName) &&
+            (notice.attachmentKind.isNotBlank() || notice.attachmentUrl.isNotBlank()) -> TaskKind.EVALUATION
+        notice.attachmentKind == "work" -> TaskKind.HOMEWORK
+        notice.attachmentKind == "exam" -> TaskKind.EXAM
         else -> null
     }
 

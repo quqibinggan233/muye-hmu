@@ -175,6 +175,7 @@ fun ScheduleScreen(viewModel: MainViewModel, xuexitongModel: XuexitongViewModel)
         onDispose { setArrangeMode(false) }
     }
     var showNoticeCenter by remember { mutableStateOf(false) }
+    var webTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     var showXuexitongLogin by remember { mutableStateOf(false) }
     var detailCourse by remember { mutableStateOf<CourseBlock?>(null) }
     // 「改课表」预填：从课表异动卡把新时间/地点带进添加课程表单，用户确认后才落库
@@ -516,7 +517,11 @@ fun ScheduleScreen(viewModel: MainViewModel, xuexitongModel: XuexitongViewModel)
                 showNoticeCenter = false
                 showXuexitongLogin = true
             },
-            onOpenChaoxing = { XuexitongLauncher.open(context) },
+            onOpenChaoxing = { target -> XuexitongLauncher.open(context, target) },
+            onOpenUrl = { pageTitle, targetUrl ->
+                showNoticeCenter = false
+                webTarget = pageTitle to targetUrl
+            },
             now = nowMillis,
             onApplyChange = { change ->
                 pendingChange = change
@@ -524,6 +529,18 @@ fun ScheduleScreen(viewModel: MainViewModel, xuexitongModel: XuexitongViewModel)
                 // 直接进画布排课：调课通知的新时间会作为幽灵块涂在课表上
                 arrange = buildArrangeState(change, courses, settings.termWeeks, termStart)
                 pendingChange = null
+            },
+        )
+    }
+
+    webTarget?.let { (pageTitle, targetUrl) ->
+        com.fengkao.timetable.ui.xuexitong.XuexitongWebDialog(
+            title = pageTitle,
+            url = targetUrl,
+            cookies = xuexitongModel.webViewCookies(),
+            onDismiss = { webTarget = null },
+            onOpenInApp = { currentTitle, currentUrl ->
+                XuexitongLauncher.open(context, targetUrl = currentUrl, title = currentTitle)
             },
         )
     }

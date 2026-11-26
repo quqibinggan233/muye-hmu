@@ -78,6 +78,11 @@ data class CategoryStyle(val bg: Color, val fg: Color, val border: Color)
 
 fun categoryStyle(category: NoticeCategory): CategoryStyle = when (category) {
     NoticeCategory.HOMEWORK -> CategoryStyle(NoticeDangerBg, NoticeDangerFg, NoticeDangerBorder)
+    NoticeCategory.EVALUATION -> CategoryStyle(
+        if (IsDark) Color(0xFF2B2142) else Color(0xFFF3EEFF),
+        if (IsDark) Color(0xFFC4B5FD) else Color(0xFF6D28D9),
+        if (IsDark) Color(0xFF4C3A78) else Color(0xFFDDD6FE),
+    )
     NoticeCategory.SIGNIN -> CategoryStyle(NoticeBlueSoft, NoticeBlue, NoticeBlue.copy(alpha = 0.35f))
     NoticeCategory.ANNOUNCEMENT -> CategoryStyle(NoticeCapsule, NoticeSub, NoticeHairline)
     NoticeCategory.OTHER -> CategoryStyle(NoticeCapsule, NoticeMeta, NoticeHairline)

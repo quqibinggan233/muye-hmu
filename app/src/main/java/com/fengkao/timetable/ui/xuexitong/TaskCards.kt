@@ -63,6 +63,8 @@ fun TaskCard(
     onOpenChaoxing: () -> Unit,
     done: Boolean = false,
     onToggleDone: () -> Unit = {},
+    onClick: () -> Unit = {},
+    onOpenTarget: (() -> Unit)? = null,
 ) {
     val visual = remember(task.courseName, courses) {
         courseVisual(NoticeFormat.shortCourse(task.courseName).ifBlank { task.title })
@@ -71,6 +73,13 @@ fun TaskCard(
     val urgent = task.status == TaskStatus.URGENT && !done && !closed
     val countdown = TaskFormat.countdownText(task, now)
     val hasCountdown = !done && !closed && countdown.isNotBlank()
+    val isEval = task.kind == TaskKind.EVALUATION
+    val primaryHeadline = if (isEval && visual.courseName.isNotBlank()) {
+        visual.courseName
+    } else {
+        task.title.ifBlank { "学习通任务" }
+    }
+    val evalSubtitle = if (isEval) task.title.ifBlank { "教学评价表" } else null
 
     Box(
         Modifier
@@ -82,9 +91,10 @@ fun TaskCard(
                 if (done) Color.Transparent else if (IsDark) NoticeHairline else Color.White,
                 RoundedCornerShape(20.dp),
             )
+            .liquidPress(pressedScale = 0.99f, onClick = onClick),
     ) {
         Column(Modifier.fillMaxWidth().padding(14.dp)) {
-            // ── ① 课程归属 ＋ 倒计时
+            // ── ① 课程归属 ＋ 类型标签 ＋ 倒计时
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
@@ -94,37 +104,42 @@ fun TaskCard(
                 )
                 Spacer(Modifier.width(7.dp))
                 Text(
-                    visual.courseName.ifBlank { "学习通" },
+                    if (isEval) "课堂教学评价" else visual.courseName.ifBlank { "学习通" },
                     color = if (done) NoticeMeta else NoticeSub,
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    // 只留这一个权重：课程名吃掉所有余量，右侧状态胶囊才能钉在行尾。
-                    // 之前这里 fill=false 再补一个 Spacer(weight(1f))，两段权重平分余量，
-                    //「已完成」胶囊的位置就随课程名长短左右漂移。
                     modifier = Modifier.weight(1f),
                 )
-                // 「考试」这种类型才单独打标；「作业」是绝大多数，每张卡都打一遍就是噪音
-                if (!done && !closed && task.kind == TaskKind.EXAM) {
+                if (!done && !closed && (task.kind == TaskKind.EXAM || isEval)) {
                     Spacer(Modifier.width(6.dp))
+                    val tagFg = if (isEval) {
+                        if (IsDark) Color(0xFFC4B5FD) else Color(0xFF6D28D9)
+                    } else {
+                        NoticeBlue
+                    }
+                    val tagBg = if (isEval) {
+                        if (IsDark) Color(0xFF2B2142) else Color(0xFFF3EEFF)
+                    } else {
+                        NoticeBlueSoft
+                    }
                     Text(
-                        "考试",
-                        color = NoticeBlue,
+                        if (isEval) "评价" else "考试",
+                        color = tagFg,
                         fontSize = 10.sp,
                         lineHeight = 13.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(NoticeBlueSoft)
+                            .background(tagBg)
                             .padding(horizontal = 6.dp, vertical = 1.dp),
                     )
                 }
                 Spacer(Modifier.width(6.dp))
                 when {
-                    // 已完成状态只由标题行尾那颗按钮表达，这里不再重复一个「✓ 已完成」胶囊
                     done -> Unit
                     closed -> StatusTag("已结束", NoticeMeta, NoticeCapsule)
                     hasCountdown -> StatusTag(
@@ -138,9 +153,9 @@ fun TaskCard(
 
             Spacer(Modifier.height(6.dp))
 
-            // ── ② 标题
+            // ── ② 标题（评价类突出课程名，副标题写明具体评价表名称）
             Text(
-                task.title.ifBlank { "学习通任务" },
+                primaryHeadline,
                 color = if (done) NoticeFaint else NoticeInk,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
@@ -150,12 +165,22 @@ fun TaskCard(
                 textDecoration = if (done) TextDecoration.LineThrough else null,
                 modifier = Modifier.fillMaxWidth(),
             )
+            if (!evalSubtitle.isNullOrBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    evalSubtitle,
+                    color = NoticeMeta,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
 
             Spacer(Modifier.height(8.dp))
 
-            // ── ③ 截止时间（左）｜ 标记完成（右）
-            // 按钮必须待在这一行：它是这张卡唯一的操作，占满标题行右端会把
-            // 两行正文都挤窄，长作业名更容易折行。
+            // ── ③ 截止时间（左）｜ 直达 + 标记完成（右）
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     TaskFormat.deadlineText(task),
@@ -167,8 +192,151 @@ fun TaskCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                Spacer(Modifier.width(10.dp))
+                if (onOpenTarget != null && task.latest.attachmentUrl.isNotBlank()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "直达 ↗",
+                        color = NoticeBlue,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(NoticeCapsule)
+                            .liquidPress(pressedScale = 0.92f, onClick = onOpenTarget)
+                            .padding(horizontal = 11.dp, vertical = 6.dp),
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
                 DoneToggle(done, onToggleDone)
+            }
+        }
+    }
+}
+
+@Composable
+fun TaskDetailDialog(
+    task: TaskItem,
+    done: Boolean,
+    onDismiss: () -> Unit,
+    onToggleDone: () -> Unit,
+    onOpenDirect: () -> Unit,
+    onOpenChaoxing: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 22.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(NoticeCard)
+                .padding(18.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    task.kind.label,
+                    color = NoticeBlue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(NoticeBlueSoft)
+                        .padding(horizontal = 7.dp, vertical = 2.dp),
+                )
+                Text(
+                    task.courseName.ifBlank { "课程任务" },
+                    color = NoticeSub,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                task.title.ifBlank { "任务详情" },
+                color = NoticeInk,
+                fontSize = 16.sp,
+                lineHeight = 22.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(6.dp))
+            val metaParts = buildList {
+                if (task.deadlineMillis != null) add("截止：${TaskFormat.deadlineText(task)}")
+                else if (!task.latest.deadline.isNullOrBlank()) add("截止：${task.latest.deadline}")
+                if (task.reminderCount > 1) add("合并 ${task.reminderCount} 条提醒")
+            }
+            if (metaParts.isNotEmpty()) {
+                Text(metaParts.joinToString(" · "), color = NoticeMeta, fontSize = 11.5.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            SelectionContainer {
+                Text(
+                    NoticeFormat.cleanContent(
+                        task.latest.content,
+                        task.latest.title,
+                        task.latest.attachmentName,
+                    ).ifBlank { task.latest.content.ifBlank { task.latest.title } },
+                    color = NoticeSub,
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState()),
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (done) "标为未完成" else "标记完成",
+                    color = NoticeSub,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(NoticeCapsule)
+                        .liquidPress(pressedScale = 0.94f, onClick = onToggleDone)
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "去学习通",
+                    color = NoticeSub,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(NoticeCapsule)
+                        .liquidPress(pressedScale = 0.94f, onClick = onOpenChaoxing)
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                )
+                Text(
+                    "直达原页面 ↗",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(NoticeBlue)
+                        .liquidPress(pressedScale = 0.94f, onClick = onOpenDirect)
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                )
             }
         }
     }
@@ -405,7 +573,14 @@ fun ChangeCard(
     }
 
     if (showRaw) {
-        NoticeRawDialog(notice = change.notice, onDismiss = { showRaw = false })
+        NoticeRawDialog(
+            notice = change.notice,
+            onDismiss = { showRaw = false },
+            onOpenChaoxing = {
+                showRaw = false
+                onOpenChaoxing()
+            },
+        )
     }
 }
 
@@ -416,7 +591,11 @@ fun ChangeCard(
  * 两层 sheet 叠在一起在部分机型上会抢 drag handle。
  */
 @Composable
-private fun NoticeRawDialog(notice: XuexitongNotice, onDismiss: () -> Unit) {
+private fun NoticeRawDialog(
+    notice: XuexitongNotice,
+    onDismiss: () -> Unit,
+    onOpenChaoxing: () -> Unit,
+) {
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -462,7 +641,25 @@ private fun NoticeRawDialog(notice: XuexitongNotice, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.height(16.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "去学习通",
+                    color = NoticeSub,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(NoticeCapsule)
+                        .liquidPress(pressedScale = 0.94f, onClick = onOpenChaoxing)
+                        .padding(horizontal = 16.dp, vertical = 7.dp),
+                )
                 Text(
                     "关闭",
                     color = NoticeBlue,

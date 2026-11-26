@@ -22,15 +22,17 @@ class UjingClient(
         .readTimeout(20, TimeUnit.SECONDS)
         .retryOnConnectionFailure(false)
         .build(),
+    private val log: (String) -> Unit = {},
 ) {
 
     fun sendSmsCaptcha(mobile: String): UjingResult<Unit> {
+        val cleanPhone = mobile.trim()
         val req = Request.Builder()
-            .url(baseUrl.trimEnd('/') + "/captcha")
+            .url(baseUrl.trimEnd('/') + "/captcha?mobile=${encode(cleanPhone)}")
             .header("x-app-code", "ZI")
             .header("x-app-version", "2.4.3")
-            .header("Content-Type", "application/json")
-            .post(JSONObject().put("mobile", mobile.trim()).toString().toRequestBody(JSON_MEDIA))
+            .header("User-Agent", MOBILE_UA)
+            .get()
             .build()
         return when (val r = executeJson(req)) {
             is UjingResult.Success -> UjingResult.Success(Unit)
@@ -152,10 +154,23 @@ class UjingClient(
         allowedCodes: Set<Int> = emptySet(),
     ): UjingResult<JSONObject> = runCatching {
         client.newCall(req).execute().use { resp ->
+            log("${req.method} ${req.url.encodedPath} http=${resp.code}")
             if (resp.code == 401) return@use UjingResult.SessionExpired()
             val body = resp.body?.string().orEmpty()
             val obj = runCatching { JSONObject(body) }.getOrNull()
             if (!resp.isSuccessful) {
+                val isWafOrHtml = resp.code == 405 ||
+                    body.contains("errors.aliyun.com", ignoreCase = true) ||
+                    body.contains("block_message", ignoreCase = true) ||
+                    body.trimStart().startsWith("<")
+                if (isWafOrHtml) {
+                    val tip = if (req.url.encodedPath.endsWith("/captcha")) {
+                        "U 净服务端安全校验拦截了第三方直接发短信（HTTP ${resp.code}），请先在微信「U 净」小程序或官方 App 获取短信验证码，再回到此处填入验证码登录（或粘贴 JWT）"
+                    } else {
+                        "U 净服务端拦截了当前请求（HTTP ${resp.code}），请稍后重试或改用微信「U 净」小程序"
+                    }
+                    return@use UjingResult.Error(tip)
+                }
                 val msg = obj?.optString("message").orEmpty().ifBlank { obj?.optString("msg").orEmpty() }
                 if (msg.contains("JWT", ignoreCase = true) || msg.contains("登录")) {
                     return@use UjingResult.SessionExpired(msg)
@@ -269,6 +284,8 @@ class UjingClient(
     companion object {
         const val DEFAULT_BASE_URL = "https://phoenix.ujing.online/api/v1"
         private val JSON_MEDIA = "application/json".toMediaType()
+        private const val MOBILE_UA =
+            "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
         fun cleanJwt(raw: String): String =
             raw.trim().removePrefix("Bearer ").removePrefix("bearer ").trim()

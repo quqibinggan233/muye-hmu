@@ -1,12 +1,14 @@
 package com.hmu.muye.data.jw
 
 import com.fengkao.timetable.data.TermSpec
+import com.fengkao.timetable.data.model.StudentInfo
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import java.net.URLDecoder
 import java.time.LocalDate
 
 class ChaoxingJwClientTest {
@@ -170,37 +172,61 @@ class ChaoxingJwClientTest {
                 """{"ret":0,"msg":"","data":[{"kcmc":"算法设计","tmc":"张教授","jxlmc":"1号教学楼","croommc":"101","xqmc":"龙子湖校区","xingqi":2,"djc":3,"djs":4,"zc":"1-16"}]}""",
             ),
         )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"xm":"李同学","xh":"20240001","sznj":"2024","yxmc":"信息工程学院","zymc":"计算机科学与技术","bjmc":"计科2401"}""",
+            ),
+        )
         val result = client.fetchSchedule("JSESSIONID=abc", "20240001", TermSpec(2026, 1))
         assertTrue(result is JwFetchResult.Success)
         val schedule = (result as JwFetchResult.Success).data
         assertEquals(1, schedule.courses.size)
         assertEquals("算法设计", schedule.courses.first().name)
+        assertEquals("李同学", schedule.student.name)
+        assertEquals("计科2401", schedule.student.className)
 
         val req1 = server.takeRequest()
         assertEquals("/admin/xsd/pkgl/xskb/queryKbForXsd?xnxq=2026-2027-1", req1.path)
         val req2 = server.takeRequest()
         assertTrue(req2.path!!.startsWith("/admin/xsd/pkgl/xskb/sdpkkbList?"))
         assertEquals("UID-9988", req2.requestUrl!!.queryParameter("xhid"))
+        val req3 = server.takeRequest()
+        assertEquals("/admin/xsd/xsjbxx/getXjxxByXnxq", req3.path)
     }
 
     @Test
-    fun `fetchGrades parses primary endpoint and falls back to mobile json`() {
+    fun `fetchGrades converts credit gpa translates kcxz codes and falls back to mobile json`() {
         server.enqueue(
             MockResponse().setBody(
-                """{"ret":0,"results":[{"id":"g1","xnxq":"2025-2026-2","kcmc":"数据结构","kcxz":"专业必修","hdxf":4.0,"xfjd":"3.9","zhcj":"89","sfjg":"1"}]}""",
+                """
+                {
+                  "ret": 0,
+                  "results": [
+                    {"id":"g1","xnxq":"2025-2026-2","kcmc":"数据结构","kcxz":"01","hdxf":4.0,"xfjd":"15.6","zhcj":"89","sfjg":"1"},
+                    {"id":"g2","xnxq":"2025-2026-2","kcmc":"大学英语","kcxz":"06","hdxf":2.0,"xfjd":"7","zhcj":"良好"}
+                  ]
+                }
+                """.trimIndent(),
             ),
         )
         val res1 = client.fetchGrades("JSESSIONID=ok")
         assertTrue(res1 is JwFetchResult.Success)
         val list1 = (res1 as JwFetchResult.Success).data
-        assertEquals(1, list1.size)
-        assertEquals(3.9, list1[0].gpa, 0.01)
+        assertEquals(2, list1.size)
+        val english = list1.first { it.courseName == "大学英语" }
+        val ds = list1.first { it.courseName == "数据结构" }
+        assertEquals(3.5, english.gpa, 0.01)
+        assertEquals("专业基础必修课", english.courseType)
+        assertEquals(3.9, ds.gpa, 0.01)
+        assertEquals("公共必修课", ds.courseType)
+        val summary = ChaoxingJwClient.computeGpaSummary(list1)
+        assertEquals((15.6 + 7.0) / 6.0, summary.averageGpa, 0.01)
 
         // 主接口返回空列表时回退到移动端 getXscjJson
         server.enqueue(MockResponse().setBody("""{"ret":0,"results":[]}"""))
         server.enqueue(
             MockResponse().setBody(
-                """{"ret":0,"data":{"xscjList":[{"id":"g2","xnxq":"2025-2026-1","kcmc":"线性代数","kcxz":"公共必修","sjxf":3.0,"bfzzhcj":"90","sfjg":"1"}]}}""",
+                """{"ret":0,"data":{"xscjList":[{"id":"g3","xnxq":"2025-2026-1","kcmc":"线性代数","kcxz":"公共必修","sjxf":3.0,"bfzzhcj":"90","sfjg":"1"}]}}""",
             ),
         )
         val res2 = client.fetchGrades("JSESSIONID=ok")
@@ -255,8 +281,49 @@ class ChaoxingJwClientTest {
         val free = (res as JwFetchResult.Success).data
         assertEquals(1, free.size)
 
+        assertEquals("/admin/api/jcsj/xnxq/getCurrentXnxq", server.takeRequest().path)
+        assertEquals("/admin/getCurrentPkZc", server.takeRequest().path)
+        val roomsReq = server.takeRequest()
+        assertEquals("/admin/jwxtgld/kbcx/getRommList", roomsReq.path)
+        val roomsForm = URLDecoder.decode(roomsReq.body.readUtf8(), "UTF-8")
+        assertTrue(roomsForm.contains("id=5cb12fea30420e4ce063cb1ea8c0d87c"))
+
         val date = ChaoxingJwClient.parseTermStartDateJson("""{"ksrq":"2026-09-07","xnxqh":"2026-2027-1"}""")
         assertEquals(LocalDate.of(2026, 9, 7), date)
+    }
+
+    @Test
+    fun `fetchStudentInfo parses getXjxxByXnxq json and mergedWith prefers real studentId`() {
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {
+                  "xm": "测试同学",
+                  "xh": "202501010101",
+                  "sznj": "2025",
+                  "yxmc": "食品工程学院",
+                  "zymc": "食品科学与工程",
+                  "bjmc": "食品2501"
+                }
+                """.trimIndent(),
+            ),
+        )
+        val res = client.fetchStudentInfo("uid=ok")
+        assertTrue(res is JwFetchResult.Success)
+        val info = (res as JwFetchResult.Success).data
+        assertEquals("测试同学", info.name)
+        assertEquals("202501010101", info.studentId)
+        assertEquals("2025", info.grade)
+        assertEquals("食品工程学院", info.department)
+        assertEquals("食品科学与工程", info.major)
+        assertEquals("食品2501", info.className)
+        assertTrue(info.isProfileComplete)
+
+        val fromXuexitong = StudentInfo(name = "测试同学", studentId = "13800138000")
+        val merged = fromXuexitong.mergedWith(info)
+        assertEquals("202501010101", merged.studentId)
+        assertEquals("食品2501", merged.className)
+        assertTrue(merged.isProfileComplete)
     }
 
     @Test
@@ -334,5 +401,48 @@ class ChaoxingJwClientTest {
         assertTrue(client.verifySession("uid=u1"))
         val req = server.takeRequest()
         assertEquals("/admin", req.path)
+    }
+
+    @Test
+    fun `relocates next-term retake passes back to initial failed term and deduplicates pass count`() {
+        val rawWithFlag = """
+            {
+              "ret": 0,
+              "results": [
+                {"id":"f1","xnxq":"2025-2026-1","kcbh":"6123060","kcmc":"[6123060]无机及分析化学","kcxz":"06","hdxf":0.0,"zhcj":"45","sfjg":"0"},
+                {"id":"r1","xnxq":"2025-2026-2","kcbh":"6123060","kcmc":"[6123060]无机及分析化学","kcxz":"06","sfbk":"1","hdxf":4.0,"xfjd":"4.0","zhcj":"60","sfjg":"1"},
+                {"id":"f2","xnxq":"2025-2026-1","kcbh":"6122037","kcmc":"[6122037]中国近现代史纲要","kcxz":"01","hdxf":0.0,"zhcj":"52","sfjg":"0"},
+                {"id":"r2","xnxq":"2025-2026-2","kcbh":"6122037","kcmc":"[6122037]中国近现代史纲要","kcxz":"01","hdxf":3.0,"xfjd":"3.0","zhcj":"60","sfjg":"1"},
+                {"id":"cx","xnxq":"2025-2026-1","kcbh":"990001","kcmc":"普通化学","kcxz":"01","hdxf":0.0,"zhcj":"40","sfjg":"0"},
+                {"id":"cx2","xnxq":"2025-2026-2","kcbh":"990001","kcmc":"普通化学","kcxz":"01","xdxz":"2","hdxf":2.0,"xfjd":"4.0","zhcj":"70","sfjg":"1"}
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = ChaoxingJwClient.parseChaoxingGradesJson(rawWithFlag)
+        assertEquals(4, parsed.size)
+
+        val chem = parsed.single { it.courseName.contains("无机及分析化学") }
+        assertEquals("2025-2026-1", chem.termLabel)
+        assertEquals("补考", chem.examNature)
+        assertEquals("2025-2026-2", chem.examTermLabel)
+        assertEquals("45", chem.initialScoreText)
+        assertTrue(chem.passed)
+
+        val history = parsed.single { it.courseName.contains("中国近现代史纲要") }
+        assertEquals("2025-2026-1", history.termLabel)
+        assertEquals("补考", history.examNature)
+        assertEquals("52", history.initialScoreText)
+
+        // 重修应保留在原重修学期，不被回迁
+        val rebuild = parsed.filter { it.courseName == "普通化学" }
+        assertEquals(2, rebuild.size)
+        val rebuildPass = rebuild.first { it.passed }
+        assertEquals("2025-2026-2", rebuildPass.termLabel)
+        assertEquals("重修", rebuildPass.examNature)
+
+        val summaryTerm1 = ChaoxingJwClient.computeGpaSummary(parsed.filter { it.termLabel == "2025-2026-1" })
+        assertEquals(3, summaryTerm1.totalCount)
+        assertEquals(2, summaryTerm1.passedCount)
     }
 }

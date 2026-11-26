@@ -14,6 +14,9 @@ data class GradeItem(
     val gpa: Double = 0.0,
     val passed: Boolean = true,
     val isNew: Boolean = false,
+    val examNature: String = "",
+    val examTermLabel: String = "",
+    val initialScoreText: String = "",
 )
 
 /** 成绩汇总统计 */

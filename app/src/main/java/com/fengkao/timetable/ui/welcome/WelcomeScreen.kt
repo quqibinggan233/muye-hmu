@@ -164,7 +164,7 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                             },
                             subtitle = when (page) {
                                 "water" -> "使用慧生活798账户，登录后可绑定龙子湖饮水设备。"
-                                "shower" -> "可在此页使用手机号与密码直连登录查看余额（可按需隐藏），或配置 shiroJID 刷新 8 位动态用水码。"
+                                "shower" -> "直接使用手机号与密码直连登录，登录后即可自动获取 8 位洗澡用水码（一卡通余额可按需开关）。"
                                 "xuexitong" -> "登录后自动汇总作业、签到与课程公告，课表与学习页同步展示。"
                                 else -> if (current == WelcomeStep.READY && !main.loggedIn)
                                     "偏好已保存，接下来可先进入牧野生活或绑定课表账户。" else current.subtitle
@@ -191,6 +191,7 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                                         onLogout = lifeModel::logoutYixiaoyuan,
                                         onRefreshBalance = lifeModel::refreshCardBalance,
                                         onRefreshWaterCode = lifeModel::saveShiroJidAndRefresh,
+                                        onGenerateWaterCode = { lifeModel.refreshShowerCode(forceGenerate = true) },
                                         onToggleShowBalance = lifeModel::setShowYixiaoyuanBalance,
                                         onSave = lifeModel::saveYixiaoyuanConfig,
                                     )
@@ -212,14 +213,16 @@ fun WelcomeScreen(mainModel: MainViewModel) {
                                             yxy.showerCode.isNotBlank() || yxy.cardBalanceYuan != null
                                         val yxySubtitle = when {
                                             life.yixiaoyuanSignedIn && yxy.showBalanceCard && yxy.cardBalanceYuan != null ->
-                                                "已登录 · 余额 ¥%.2f（可点此配置用水码）".format(yxy.cardBalanceYuan)
+                                                "已登录 · 余额 ¥%.2f（已同步用水码）".format(yxy.cardBalanceYuan)
+                                            life.yixiaoyuanSignedIn && yxy.showerCode.isNotBlank() ->
+                                                "已登录 · 用水码 ${yxy.formattedShowerCode()}"
                                             life.yixiaoyuanSignedIn ->
                                                 "已登录 · ${maskAccount(life.yixiaoyuanMobile)}"
                                             yxy.showerCode.isNotBlank() ->
                                                 "已配用水码 ${yxy.formattedShowerCode()}（可点此补充登录）"
                                             yxy.hasCredential ->
-                                                "已配 shiroJID · 点此刷新 8 位用水码"
-                                            else -> "支持页内密码直连登录查余额与配置 8 位用水码"
+                                                "已配会话 · 点此刷新 8 位用水码"
+                                            else -> "手机号密码直连登录，自动获取 8 位洗澡用水码"
                                         }
                                         val xxConnected = xuexitong.loggedIn && !xuexitong.sessionExpired
                                         val xxSubtitle = if (xxConnected) {

@@ -214,6 +214,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (hasAuth) {
             SyncScheduler.ensure(getApplication())
+            if (schedule != null && !schedule.student.isProfileComplete &&
+                (jwConnected || container.jwStore.username().isNotBlank())
+            ) {
+                viewModelScope.launch {
+                    val enriched = container.repository.enrichStudentInfoIntoCache() ?: return@launch
+                    _state.update {
+                        if (it.schedule?.xnm == enriched.xnm && it.schedule.term == enriched.term) {
+                            it.copy(schedule = enriched)
+                        } else it
+                    }
+                }
+            }
             if (s.autoSync && (jwConnected || xxConnected)) sync()
         }
         refreshWidgets()
@@ -285,6 +297,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     loginError = null,
                     syncMessage = "超星教务已登录（会话加密保存在本地）",
                 )
+            }
+            val enriched = container.repository.enrichStudentInfoIntoCache()
+            if (enriched != null) {
+                _state.update {
+                    if (it.schedule == null || (it.schedule.xnm == enriched.xnm && it.schedule.term == enriched.term)) {
+                        it.copy(schedule = enriched)
+                    } else it
+                }
             }
             SyncScheduler.ensure(getApplication())
             sync()

@@ -17,7 +17,7 @@ import java.util.UUID
 class CampusLifeStore(context: Context) {
 
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     private val _campus = MutableStateFlow(loadCampus())
     val campusFlow: Flow<HmuCampus> = _campus.asStateFlow()

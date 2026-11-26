@@ -37,6 +37,8 @@ class XuexitongRepository(context: Context) {
 
     fun phone(): String = store.phone()
 
+    fun webViewCookies(): List<okhttp3.Cookie> = cookieJar.allCookies()
+
     fun hasSession(): Boolean =
         store.phone().isNotBlank() && (store.cookies().isNotBlank() || store.password() != null)
 

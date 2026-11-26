@@ -30,7 +30,8 @@ class UjingClientTest {
         val cap = client.sendSmsCaptcha("13800138000")
         assertTrue(cap is UjingResult.Success)
         val req1 = server.takeRequest()
-        assertEquals("/captcha", req1.path)
+        assertEquals("GET", req1.method)
+        assertEquals("/captcha?mobile=13800138000", req1.path)
         assertEquals("ZI", req1.getHeader("x-app-code"))
 
         server.enqueue(MockResponse().setBody("""{"code":0,"data":{"token":"jwt-xyz"}}"""))
@@ -112,5 +113,18 @@ class UjingClientTest {
         server.enqueue(MockResponse().setResponseCode(401).setBody("""{"code":401,"message":"JWT token is missing"}"""))
         val res = client.scanDeviceQr("bad", "qr")
         assertTrue(res is UjingResult.SessionExpired)
+    }
+
+    @Test
+    fun `maps Aliyun WAF 405 html on captcha to actionable wechat guidance`() {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(405)
+                .setBody("""<!doctypehtml><html><div id="block_message">blocked</div>errors.aliyun.com</html>"""),
+        )
+        val res = client.sendSmsCaptcha("13800138000")
+        assertTrue(res is UjingResult.Error)
+        val msg = (res as UjingResult.Error).message
+        assertTrue(msg.contains("微信小程序") || msg.contains("获取短信验证码"))
     }
 }

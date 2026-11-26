@@ -31,8 +31,8 @@ android {
         applicationId = "com.hmu.muye"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.2.1"
         buildConfigField("String", "WATER_API_GATEWAY", waterConfig("API_GATEWAY", "https://i.ilife798.com/api/v1"))
         buildConfigField("String", "WATER_API_CID", waterConfig("API_CID"))
         buildConfigField("String", "UPDATE_REPO", gradleProp("muye.updateRepo"))

@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -49,7 +51,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -80,6 +84,7 @@ import com.fengkao.timetable.ui.theme.InkMid
 import com.fengkao.timetable.ui.theme.IsDark
 import com.fengkao.timetable.ui.theme.SheetColor
 import com.fengkao.timetable.ui.theme.appBackground
+import com.fengkao.timetable.data.water.WaterDevice
 import com.fengkao.timetable.ui.water.ServiceMessage
 import com.fengkao.timetable.ui.water.WaterScreen
 import com.fengkao.timetable.ui.water.WaterUiState
@@ -241,7 +246,12 @@ fun LifeScreen(
             )
         }
 
-        ServiceMessage(state.statusMessage, state.statusError)
+        val visibleMessage = state.statusMessage?.takeUnless { msg ->
+            !state.yixiaoyuan.showBalanceCard && msg.contains("余额")
+        }
+        Box(Modifier.clickable(enabled = visibleMessage != null) { lifeModel.clearMessage() }) {
+            ServiceMessage(visibleMessage, state.statusError)
+        }
 
         // 2. 易校园一卡通余额条（可选显示，仅一卡通，不含电费）
         if (state.yixiaoyuan.showBalanceCard) {
@@ -273,6 +283,7 @@ fun LifeScreen(
         ) {
             WaterTile(
                 water = water,
+                onSelectDevice = waterModel::select,
                 onOneTapStart = {
                     if (water.loggedIn && water.device != null) waterModel.start()
                     else showWaterSheet = true
@@ -282,10 +293,15 @@ fun LifeScreen(
             )
             ShowerCodeTile(
                 yxy = state.yixiaoyuan,
+                signedIn = state.yixiaoyuanSignedIn,
                 waterCode = state.waterCodeInfo,
                 busy = state.yixiaoyuanBusy,
-                onRefresh = lifeModel::refreshShowerCode,
-                onOpenApp = { IdentityCodeShortcuts.openYixiaoyuan(context) },
+                feedback = state.showerFeedback,
+                feedbackError = state.showerFeedbackError,
+                onRefresh = {
+                    lifeModel.refreshShowerCode(forceGenerate = state.yixiaoyuan.showerCode.isNotBlank())
+                },
+                onCancel = lifeModel::cancelShowerCode,
                 onConfigure = { showYxyDialog = true },
                 modifier = Modifier.weight(1f).fillMaxHeight(),
             )
@@ -405,6 +421,8 @@ fun LifeScreen(
             onLogout = lifeModel::logoutYixiaoyuan,
             onRefreshBalance = lifeModel::refreshCardBalance,
             onRefreshWaterCode = lifeModel::saveShiroJidAndRefresh,
+            onGenerateWaterCode = { lifeModel.refreshShowerCode(forceGenerate = true) },
+            onCancelWaterCode = lifeModel::cancelShowerCode,
             onToggleShowBalance = lifeModel::setShowYixiaoyuanBalance,
             onSave = { ymId, shiro, bal, threshold, code ->
                 lifeModel.saveYixiaoyuanConfig(ymId, shiro, bal, threshold, code)
@@ -462,10 +480,18 @@ fun LifeScreen(
     }
 
     if (showUjingDialog) {
+        var smsCooldown by rememberSaveable { mutableIntStateOf(0) }
+        LaunchedEffect(smsCooldown) {
+            if (smsCooldown > 0) {
+                kotlinx.coroutines.delay(1000L)
+                smsCooldown -= 1
+            }
+        }
         UjingSheet(
             state = state,
+            smsCooldown = smsCooldown,
             onDismiss = { showUjingDialog = false },
-            onSendCaptcha = { phone -> lifeModel.sendUjingCaptcha(phone) },
+            onSendCaptcha = { phone -> lifeModel.sendUjingCaptcha(phone) { smsCooldown = 60 } },
             onLogin = { phone, code -> lifeModel.loginUjing(phone, code) },
             onSaveJwt = lifeModel::saveUjingJwt,
             onLogout = lifeModel::logoutUjing,
@@ -718,13 +744,41 @@ private fun ParcelCard(
     }
 }
 
+private fun waterDeviceShortLabel(device: WaterDevice, all: List<WaterDevice>): String {
+    val name = device.name.trim()
+    val kindLabel: (String) -> String? = { raw ->
+        when {
+            raw.contains("冷水") || raw.contains("凉水") -> "冷水"
+            raw.contains("常温") -> "常温"
+            raw.contains("热水") -> "热水"
+            raw.contains("开水") -> "开水"
+            raw.contains("温水") -> "温水"
+            else -> null
+        }
+    }
+    val mapped = all.map { kindLabel(it.name) }
+    val own = kindLabel(name)
+    if (own != null && mapped.count { it == own } == 1) return own
+    val names = all.map { it.name.trim() }
+    val prefixLen = if (names.size > 1) {
+        val minLen = names.minOf { it.length }
+        var idx = 0
+        while (idx < minLen && names.all { it[idx] == names[0][idx] }) idx++
+        idx
+    } else 0
+    val suffix = name.drop(prefixLen).trim().trim('-', '_', ' ', '(', ')', '（', '）')
+    return suffix.ifBlank { own ?: name.takeLast(5) }.take(6)
+}
+
 @Composable
 private fun WaterTile(
     water: WaterUiState,
+    onSelectDevice: (String) -> Unit,
     onOneTapStart: () -> Unit,
     onOpenManage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val canSwitch = !water.busy && water.startSeconds == 0
     Column(
         modifier
             .clip(RoundedCornerShape(18.dp))
@@ -759,7 +813,7 @@ private fun WaterTile(
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         Text(
             water.device?.name ?: if (water.loggedIn) "点此绑定常用饮水机" else "点此登录慧生活 798",
             fontSize = 11.sp,
@@ -767,13 +821,54 @@ private fun WaterTile(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        Spacer(Modifier.height(10.dp))
+        if (water.loggedIn && water.devices.size > 1) {
+            Spacer(Modifier.height(6.dp))
+            val useScroll = water.devices.size > 2
+            val rowMod = if (useScroll) {
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+            } else {
+                Modifier.fillMaxWidth()
+            }
+            Row(rowMod, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                water.devices.forEach { dev ->
+                    val selected = dev.id == water.selectedId
+                    val isCold = dev.name.contains("冷水") || dev.name.contains("凉水") || dev.name.contains("常温")
+                    val isHot = dev.name.contains("热水") || dev.name.contains("开水") || dev.name.contains("温水")
+                    val (bg, fg) = when {
+                        !selected -> softSurface() to InkMid
+                        isCold -> (if (IsDark) Color(0x280EA5E9) else Color(0xFFE6F4FA)) to
+                            (if (IsDark) Color(0xFF7DD3FC) else Color(0xFF0E6A8F))
+                        isHot -> (if (IsDark) Color(0x28F97316) else Color(0xFFFEECE6)) to
+                            (if (IsDark) Color(0xFFFDBA74) else Color(0xFFC2410C))
+                        else -> BrandGreenSoft to BrandGreen
+                    }
+                    Box(
+                        (if (useScroll) Modifier else Modifier.weight(1f))
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(bg)
+                            .clickable(enabled = canSwitch && !selected) { onSelectDevice(dev.id) }
+                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            waterDeviceShortLabel(dev, water.devices),
+                            fontSize = 11.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            color = fg,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         Button(
             onClick = onOneTapStart,
-            enabled = !water.busy && water.startSeconds == 0,
+            enabled = canSwitch,
             colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
             shape = RoundedCornerShape(11.dp),
-            modifier = Modifier.fillMaxWidth().height(36.dp),
+            modifier = Modifier.fillMaxWidth().height(34.dp),
         ) {
             Text(
                 when {
@@ -791,14 +886,17 @@ private fun WaterTile(
 @Composable
 private fun ShowerCodeTile(
     yxy: com.hmu.muye.data.campus.YixiaoyuanState,
+    signedIn: Boolean,
     waterCode: com.hmu.muye.data.yixiaoyuan.WaterCode?,
     busy: Boolean,
+    feedback: String?,
+    feedbackError: Boolean,
     onRefresh: () -> Unit,
-    onOpenApp: () -> Unit,
+    onCancel: () -> Unit,
     onConfigure: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val hasShiro = yxy.hasCredential
+    val canFetch = signedIn || yxy.hasCredential
     val formatted = yxy.formattedShowerCode()
     Column(
         modifier
@@ -812,57 +910,114 @@ private fun ShowerCodeTile(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
             Column {
                 Text("洗澡用水码", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = InkDark)
-                Text(if (hasShiro) "8 位动态码" else "易校园 App", fontSize = 11.sp, color = InkGray)
+                Text(if (canFetch) "8 位动态码" else "登录即用", fontSize = 11.sp, color = InkGray)
             }
-            if (hasShiro) {
-                Text(
-                    if (busy) "刷新中" else "刷新码",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = BrandGreen,
-                    modifier = Modifier.clickable(enabled = !busy, onClick = onRefresh).padding(2.dp),
-                )
-            } else {
-                Text(
-                    "打开 App",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = BrandGreen,
-                    modifier = Modifier.clickable(onClick = onOpenApp).padding(2.dp),
-                )
-            }
+            Text(
+                if (canFetch) "设置" else "去登录",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (canFetch) InkMid else BrandGreen,
+                modifier = Modifier.clickable(onClick = onConfigure).padding(2.dp),
+            )
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         Box(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(11.dp))
                 .background(BrandGreenSoft)
+                .clickable(enabled = !busy) {
+                    if (canFetch && formatted.isBlank()) onRefresh() else onConfigure()
+                }
                 .padding(vertical = 8.dp, horizontal = 6.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                formatted.ifBlank { "点击配置" },
-                fontSize = if (formatted.isNotBlank()) 16.sp else 13.sp,
+                formatted.ifBlank { if (canFetch) "暂无生效码" else "登录获取" },
+                fontSize = if (formatted.isNotBlank()) 16.sp else 12.sp,
                 fontWeight = FontWeight.ExtraBold,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = if (formatted.isNotBlank()) FontFamily.Monospace else FontFamily.Default,
                 color = BrandGreen,
                 maxLines = 1,
             )
         }
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(4.dp))
+        val hintText = feedback?.takeIf { it.isNotBlank() }
+            ?: waterCode?.summaryText()?.takeIf { it.isNotBlank() }
+            ?: "8 位用水码 · 水控机直接输入"
+        val hintColor = when {
+            feedbackError -> Color(0xFFD64541)
+            !feedback.isNullOrBlank() -> BrandGreen
+            else -> InkGray
+        }
         Text(
-            if (waterCode != null) {
-                if (waterCode.longTerm) "长期有效 · 余 ${waterCode.remainTimes} 次"
-                else "有效 ${waterCode.validSeconds / 60} 分钟 · 余 ${waterCode.remainTimes} 次"
-            } else {
-                "8 位用水码 · 水控机直接输入"
-            },
+            hintText,
             fontSize = 10.sp,
-            color = InkGray,
+            color = hintColor,
             textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.fillMaxWidth(),
         )
+        if (canFetch) {
+            Spacer(Modifier.height(6.dp))
+            if (formatted.isNotBlank()) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(BrandGreenSoft)
+                            .clickable(enabled = !busy, onClick = onRefresh)
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            if (busy) "刷新中" else "换新码",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = BrandGreen,
+                            maxLines = 1,
+                        )
+                    }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (IsDark) Color(0x28D64541) else Color(0xFFFDECEC))
+                            .clickable(enabled = !busy, onClick = onCancel)
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            if (busy) "处理中" else "停用",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFFD64541),
+                            maxLines = 1,
+                        )
+                    }
+                }
+            } else {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(BrandGreen)
+                        .clickable(enabled = !busy, onClick = onRefresh)
+                        .padding(vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (busy) "获取中…" else "获取用水码",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1084,6 +1239,8 @@ private fun YixiaoyuanConfigDialog(
     onLogout: () -> Unit,
     onRefreshBalance: () -> Unit,
     onRefreshWaterCode: (shiroJid: String) -> Unit,
+    onGenerateWaterCode: () -> Unit = {},
+    onCancelWaterCode: () -> Unit = {},
     onToggleShowBalance: (Boolean) -> Unit,
     onSave: (String, String?, String, String, String) -> Unit,
 ) {
@@ -1102,11 +1259,14 @@ private fun YixiaoyuanConfigDialog(
     }
     var code by rememberSaveable(state.showerCode) { mutableStateOf(state.showerCode) }
     var showAdvanced by rememberSaveable { mutableStateOf(false) }
+    val displayStatus = statusMessage?.takeUnless { !state.showBalanceCard && it.contains("余额") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = CardWhite,
-        title = { Text("易校园 · 一卡通与洗澡用水码") },
+        title = {
+            Text(if (state.showBalanceCard) "易校园 · 用水码与一卡通" else "易校园 · 洗澡用水码")
+        },
         text = {
             Column(
                 Modifier.verticalScroll(rememberScrollState()),
@@ -1129,26 +1289,47 @@ private fun YixiaoyuanConfigDialog(
 
                 HorizontalDivider(color = Hairline)
 
-                Text("一卡通余额 · 易校园账号登录", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = InkDark)
+                Text(
+                    if (state.showBalanceCard) "易校园账号（洗澡用水码 · 一卡通余额）"
+                    else "易校园账号（洗澡用水码）",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = InkDark,
+                )
                 if (signedIn) {
-                    Text(
-                        "已登录 ${savedMobile.ifBlank { state.ymId }} · 当前余额：${state.cardBalanceYuan?.let { "¥ %.2f".format(it) } ?: "待刷新"}",
-                        fontSize = 12.sp,
-                        color = InkMid,
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = onRefreshBalance,
-                            enabled = !busy,
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
-                        ) {
-                            Text(if (busy) "处理中…" else "刷新余额")
+                    if (state.showBalanceCard) {
+                        Text(
+                            "已登录 ${savedMobile.ifBlank { state.ymId }} · 当前余额：${state.cardBalanceYuan?.let { "¥ %.2f".format(it) } ?: "待刷新"}",
+                            fontSize = 12.sp,
+                            color = InkMid,
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = onRefreshBalance,
+                                enabled = !busy,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
+                            ) {
+                                Text(if (busy) "处理中…" else "刷新余额")
+                            }
+                            OutlinedButton(
+                                onClick = onLogout,
+                                enabled = !busy,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("退出账号")
+                            }
                         }
+                    } else {
+                        Text(
+                            "已登录 ${savedMobile.ifBlank { state.ymId }}（已自动关联洗澡用水码）",
+                            fontSize = 12.sp,
+                            color = InkMid,
+                        )
                         OutlinedButton(
                             onClick = onLogout,
                             enabled = !busy,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text("退出账号")
                         }
@@ -1191,9 +1372,9 @@ private fun YixiaoyuanConfigDialog(
                     }
                     Text(
                         if (useSmsLogin) {
-                            "先点下方打开易校园 App 获取短信验证码，再填入此处提交登录即可同步余额。"
+                            "先打开易校园 App 获取短信验证码，填入此处提交登录即可同步用水码。"
                         } else {
-                            "直接输入易校园手机号与密码即可直连登录，无需跳转官方 App。"
+                            "直接输入易校园手机号与密码即可直连登录，自动同步 8 位洗澡用水码，无需手动填 Cookie。"
                         },
                         fontSize = 11.sp,
                         color = InkGray,
@@ -1260,42 +1441,56 @@ private fun YixiaoyuanConfigDialog(
 
                 HorizontalDivider(color = Hairline)
 
-                Text("浴室 8 位动态用水码（shiroJID）", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = InkDark)
+                Text("浴室 8 位动态用水码", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = InkDark)
                 val formattedCode = state.formattedShowerCode()
                 if (formattedCode.isNotBlank()) {
                     Text(
-                        "当前码：$formattedCode" + (waterCode?.let {
-                            if (it.longTerm) "（长期有效 · 余 ${it.remainTimes} 次）"
-                            else "（有效 ${it.validSeconds / 60} 分钟 · 余 ${it.remainTimes} 次）"
-                        } ?: ""),
+                        "当前码：$formattedCode" + (
+                            waterCode?.summaryText()?.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
+                        ),
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold,
                         color = BrandGreen,
                     )
                 }
-                OutlinedTextField(
-                    shiro,
-                    { shiro = it },
-                    label = {
-                        Text(
-                            if (state.hasCredential) "shiroJID Cookie（已配置，留空保持不变）"
-                            else "shiroJID Cookie（填一次即可刷新 8 位码）",
-                        )
-                    },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedButton(
-                    onClick = {
-                        val draft = shiro
-                        shiro = ""
-                        onRefreshWaterCode(draft)
-                    },
-                    enabled = !busy && (state.hasCredential || shiro.isNotBlank()),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (busy) "刷新中…" else "刷新 8 位用水码", color = BrandGreen, fontWeight = FontWeight.Medium)
+                val canFetchCode = signedIn || state.hasCredential || shiro.isNotBlank()
+                if (canFetchCode) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                val draft = shiro
+                                shiro = ""
+                                onRefreshWaterCode(draft)
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(if (busy) "刷新中…" else "刷新状态", color = BrandGreen, fontWeight = FontWeight.Medium)
+                        }
+                        OutlinedButton(
+                            onClick = onGenerateWaterCode,
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("换新码", color = InkDark, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                    if (formattedCode.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = onCancelWaterCode,
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("停用当前码", color = Color(0xFFD64541), fontWeight = FontWeight.Medium)
+                        }
+                    }
+                } else {
+                    Text(
+                        "在上方登录易校园账号后自动获取，无需手动配置 Cookie",
+                        fontSize = 11.sp,
+                        color = InkGray,
+                    )
                 }
 
                 if (state.showBalanceCard) {
@@ -1310,9 +1505,28 @@ private fun YixiaoyuanConfigDialog(
                 }
 
                 TextButton(onClick = { showAdvanced = !showAdvanced }) {
-                    Text(if (showAdvanced) "收起手动 / 高级参数" else "手动 / 高级参数（可选）", fontSize = 12.sp, color = InkGray)
+                    Text(
+                        if (showAdvanced) "收起高级 / 手动排查" else "高级 / 手动排查（可选）",
+                        fontSize = 12.sp,
+                        color = InkGray,
+                    )
                 }
                 if (showAdvanced) {
+                    OutlinedTextField(
+                        shiro,
+                        { shiro = it },
+                        label = {
+                            Text(
+                                if (state.hasCredential) "shiroJID Cookie（已配置，留空保持不变）"
+                                else "手动填入 shiroJID Cookie（通常无需填写）",
+                            )
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedButton(onClick = onOpenApp, modifier = Modifier.fillMaxWidth()) {
+                        Text("打开易校园 App")
+                    }
                     OutlinedTextField(
                         code,
                         { code = it.filter(Char::isDigit).take(8) },
@@ -1321,14 +1535,16 @@ private fun YixiaoyuanConfigDialog(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
-                        balance,
-                        { balance = it },
-                        label = { Text("手动修正当前余额（元）") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    if (state.showBalanceCard) {
+                        OutlinedTextField(
+                            balance,
+                            { balance = it },
+                            label = { Text("手动修正当前余额（元）") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                     OutlinedTextField(
                         ymId,
                         { ymId = it },
@@ -1338,7 +1554,7 @@ private fun YixiaoyuanConfigDialog(
                     )
                 }
 
-                statusMessage?.let { msg ->
+                displayStatus?.let { msg ->
                     Text(
                         msg,
                         fontSize = 11.sp,
@@ -1468,6 +1684,7 @@ private fun ParcelRulesDialog(
 @Composable
 private fun UjingSheet(
     state: LifeUiState,
+    smsCooldown: Int,
     onDismiss: () -> Unit,
     onSendCaptcha: (String) -> Unit,
     onLogin: (String, String) -> Unit,
@@ -1480,7 +1697,7 @@ private fun UjingSheet(
     onScanQr: () -> Unit,
     onOpenWeChat: () -> Unit,
 ) {
-    var phone by rememberSaveable { mutableStateOf("") }
+    var phone by rememberSaveable(state.yixiaoyuanMobile) { mutableStateOf(state.yixiaoyuanMobile) }
     var smsCode by rememberSaveable { mutableStateOf("") }
     var pastedJwt by rememberSaveable { mutableStateOf("") }
 
@@ -1492,17 +1709,20 @@ private fun UjingSheet(
         Column(
             Modifier
                 .fillMaxWidth()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text("宿舍吹风机 · U 净", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = InkDark)
-            ServiceMessage(state.ujingMessage, state.ujingError)
+            if (state.ujingConfigured) {
+                ServiceMessage(state.ujingMessage, state.ujingError)
+            }
 
             if (!state.ujingConfigured) {
                 Text(
-                    "使用手机号短信登录即可查询龙子湖附近门店空闲情况与扫码查机（请勿频繁重复登录，避免触发平台限流）。",
+                    "输入手机号与短信验证码登录；若「发送验证码」被 U 净安全校验拦截，可先在微信「U 净」小程序发送短信后再填入验证码直接登录（或粘贴 JWT）。",
                     fontSize = 12.sp,
                     color = InkMid,
                 )
@@ -1528,13 +1748,23 @@ private fun UjingSheet(
                         modifier = Modifier.weight(1f),
                     )
                     OutlinedButton(
-                        enabled = !state.ujingBusy && phone.length == 11,
+                        enabled = !state.ujingBusy && smsCooldown == 0,
                         onClick = { onSendCaptcha(phone) },
-                    ) { Text("发送验证码", fontSize = 12.sp) }
+                    ) {
+                        Text(
+                            when {
+                                state.ujingBusy -> "发送中…"
+                                smsCooldown > 0 -> "${smsCooldown}s"
+                                else -> "发送验证码"
+                            },
+                            fontSize = 12.sp,
+                        )
+                    }
                 }
+                ServiceMessage(state.ujingMessage, state.ujingError)
                 Button(
                     onClick = { onLogin(phone, smsCode) },
-                    enabled = !state.ujingBusy && phone.length == 11 && smsCode.isNotBlank(),
+                    enabled = !state.ujingBusy,
                     colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),

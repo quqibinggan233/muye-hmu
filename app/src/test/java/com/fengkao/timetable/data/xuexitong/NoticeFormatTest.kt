@@ -43,6 +43,10 @@ class NoticeFormatTest {
             NoticeCategory.ANNOUNCEMENT,
             NoticeFormat.classify("课程教学使用的 OpenGauss 安装方法", "详见附件，请同学们按建议方法安装"),
         )
+        assertEquals(
+            NoticeCategory.EVALUATION,
+            NoticeFormat.classify("作业通知", "课程名称：生物化学\n作业名称：课堂教学学生评价表 - 理论课（5星评分版）"),
+        )
     }
 
     @Test

@@ -99,6 +99,7 @@ internal fun YixiaoyuanAccountPage(
     onLogout: () -> Unit,
     onRefreshBalance: () -> Unit,
     onRefreshWaterCode: (shiroJid: String) -> Unit,
+    onGenerateWaterCode: () -> Unit = {},
     onToggleShowBalance: (Boolean) -> Unit,
     onSave: (ymId: String, shiroJid: String?, balanceText: String, thresholdText: String, showerCode: String) -> Unit,
 ) {
@@ -108,9 +109,11 @@ internal fun YixiaoyuanAccountPage(
     var useSmsLogin by rememberSaveable { mutableStateOf(false) }
     var smsCode by rememberSaveable { mutableStateOf("") }
     var shiro by rememberSaveable { mutableStateOf("") }
+    var showCookieAdvanced by rememberSaveable { mutableStateOf(false) }
     var threshold by rememberSaveable(state.lowBalanceThresholdYuan) {
         mutableStateOf(state.lowBalanceThresholdYuan.toString())
     }
+    val displayStatus = statusMessage?.takeUnless { !state.showBalanceCard && it.contains("余额") }
 
     SettingsSection("显示偏好") {
         SettingsSwitchItem(
@@ -122,7 +125,7 @@ internal fun YixiaoyuanAccountPage(
         )
     }
 
-    // 卡片 1：一卡通余额登录（默认页内密码直连，可选短信验证码）
+    // 卡片 1：易校园账号登录（默认页内密码直连，可选短信验证码；登录后自动获取 8 位洗澡用水码）
     Column(
         Modifier
             .fillMaxWidth()
@@ -131,27 +134,48 @@ internal fun YixiaoyuanAccountPage(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("一卡通余额 · 易校园账号登录", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = InkDark)
+        Text(
+            if (state.showBalanceCard) "易校园账号（洗澡用水码 · 一卡通余额）" else "易校园账号（洗澡用水码）",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = InkDark,
+        )
         if (signedIn) {
-            Text(
-                "已登录 ${maskAccount(savedMobile.ifBlank { state.ymId })} · 余额：${state.cardBalanceYuan?.let { "¥ %.2f".format(it) } ?: "待刷新"}",
-                fontSize = 13.sp,
-                color = InkMid,
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = onRefreshBalance,
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
-                ) {
-                    Text(if (busy) "刷新中…" else "刷新余额")
+            if (state.showBalanceCard) {
+                Text(
+                    "已登录 ${maskAccount(savedMobile.ifBlank { state.ymId })} · 余额：${state.cardBalanceYuan?.let { "¥ %.2f".format(it) } ?: "待刷新"}",
+                    fontSize = 13.sp,
+                    color = InkMid,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = onRefreshBalance,
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
+                    ) {
+                        Text(if (busy) "刷新中…" else "刷新余额")
+                    }
+                    OutlinedButton(
+                        onClick = onLogout,
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text("退出账号")
+                    }
                 }
+            } else {
+                Text(
+                    "已登录 ${maskAccount(savedMobile.ifBlank { state.ymId })}（已自动关联洗澡用水码）",
+                    fontSize = 13.sp,
+                    color = InkMid,
+                )
                 OutlinedButton(
                     onClick = onLogout,
                     enabled = !busy,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                 ) {
                     Text("退出账号")
@@ -195,9 +219,9 @@ internal fun YixiaoyuanAccountPage(
             }
             Text(
                 if (useSmsLogin) {
-                    "官方发送短信接口绑定原生安全令牌；如使用验证码方式，需先在易校园 App 获取验证码再填入此处提交。"
+                    "先在易校园 App 获取短信验证码，填入此处提交登录即可自动同步 8 位洗澡用水码。"
                 } else {
-                    "直接使用易校园绑定手机号与登录密码完成登录，无需跳转官方 App，登录后即可查看一卡通余额。"
+                    "直接使用易校园绑定手机号与登录密码完成登录，登录后自动获取 8 位洗澡用水码，无需手动配置 Cookie。"
                 },
                 fontSize = 12.sp,
                 color = InkGray,
@@ -268,7 +292,7 @@ internal fun YixiaoyuanAccountPage(
         }
     }
 
-    // 卡片 2：浴室 8 位动态用水码（shiroJID）
+    // 卡片 2：浴室 8 位动态用水码（登录即可自动获取与刷新）
     Column(
         Modifier
             .fillMaxWidth()
@@ -296,44 +320,66 @@ internal fun YixiaoyuanAccountPage(
                     color = BrandGreen,
                 )
             }
-            waterCode?.let {
-                Text(
-                    if (it.longTerm) "长期有效 · 当日剩余 ${it.remainTimes} 次"
-                    else "有效 ${it.validSeconds / 60} 分钟 · 当日剩余 ${it.remainTimes} 次",
-                    fontSize = 11.sp,
-                    color = InkGray,
-                )
+            waterCode?.summaryText()?.takeIf { it.isNotBlank() }?.let { summary ->
+                Text(summary, fontSize = 11.sp, color = InkGray)
             }
         }
-        OutlinedTextField(
-            value = shiro,
-            onValueChange = { shiro = it },
-            label = {
-                Text(
-                    if (state.hasCredential) "shiroJID Cookie（已配置，留空保持不变）"
-                    else "shiroJID Cookie（填一次即可刷新 8 位用水码）",
-                )
-            },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(
-                onClick = {
-                    val draft = shiro
-                    shiro = ""
-                    onRefreshWaterCode(draft)
-                },
-                enabled = !busy && (state.hasCredential || shiro.isNotBlank()),
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
-            ) {
-                Text(if (busy) "刷新中…" else "刷新 8 位用水码")
+        val canFetchCode = signedIn || state.hasCredential || shiro.isNotBlank()
+        if (canFetchCode) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        val draft = shiro
+                        shiro = ""
+                        onRefreshWaterCode(draft)
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
+                ) {
+                    Text(if (busy) "刷新中…" else "刷新 8 位用水码")
+                }
+                OutlinedButton(
+                    onClick = onGenerateWaterCode,
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Text("重新获取新码")
+                }
             }
+        } else {
+            Text(
+                "在上方登录易校园账号后即可自动显示 8 位用水码，无需手动填 Cookie。",
+                fontSize = 12.sp,
+                color = InkGray,
+            )
+        }
+
+        TextButton(onClick = { showCookieAdvanced = !showCookieAdvanced }) {
+            Text(
+                if (showCookieAdvanced) "收起高级 / 手动 Cookie 排查" else "高级 / 手动 Cookie 排查（通常无需填写）",
+                fontSize = 12.sp,
+                color = InkGray,
+            )
+        }
+        if (showCookieAdvanced) {
+            OutlinedTextField(
+                value = shiro,
+                onValueChange = { shiro = it },
+                label = {
+                    Text(
+                        if (state.hasCredential) "shiroJID Cookie（已配置，留空保持不变）"
+                        else "手动填入 shiroJID Cookie（通常无需填写）",
+                    )
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
             OutlinedButton(
                 onClick = onOpenApp,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
             ) {
                 Text("打开易校园 App")
@@ -369,7 +415,7 @@ internal fun YixiaoyuanAccountPage(
         }
     }
 
-    statusMessage?.let { SettingsHint(it, error = statusError) }
+    displayStatus?.let { SettingsHint(it, error = statusError) }
 }
 
 @Composable

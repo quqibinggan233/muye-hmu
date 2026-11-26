@@ -34,7 +34,44 @@ data class StudentInfo(
     val department: String = "",
     val major: String = "",
     val grade: String = "",
-)
+) {
+    val isProfileComplete: Boolean
+        get() = name.isNotBlank() && studentId.isNotBlank() && !isPhoneNumber(studentId) &&
+            className.isNotBlank() && department.isNotBlank() &&
+            major.isNotBlank() && grade.isNotBlank()
+
+    /**
+     * 合并另一份学生学籍信息：保留非空字段，并优先选用非手机号的真实学号（避免学习通手机号覆盖教务学号）。
+     */
+    fun mergedWith(other: StudentInfo?): StudentInfo {
+        if (other == null) return this
+        return StudentInfo(
+            name = name.ifBlank { other.name },
+            studentId = chooseStudentId(studentId, other.studentId),
+            className = className.ifBlank { other.className },
+            department = department.ifBlank { other.department },
+            major = major.ifBlank { other.major },
+            grade = grade.ifBlank { other.grade },
+        )
+    }
+
+    companion object {
+        private val CHINA_MOBILE_REGEX = Regex("""^1[3-9]\d{9}$""")
+
+        fun isPhoneNumber(value: String): Boolean = CHINA_MOBILE_REGEX.matches(value.trim())
+
+        fun chooseStudentId(primary: String, fallback: String): String {
+            val p = primary.trim()
+            val f = fallback.trim()
+            return when {
+                p.isBlank() -> f
+                f.isBlank() -> p
+                isPhoneNumber(p) && !isPhoneNumber(f) -> f
+                else -> p
+            }
+        }
+    }
+}
 
 /**
  * 统计页「空闲时间块分析」：用户手动添加的事务占用（每周重复）。

@@ -87,6 +87,13 @@ class XuexitongCookieJar(
     }
 
     @Synchronized
+    fun allCookies(): List<Cookie> {
+        val now = System.currentTimeMillis()
+        cookies.removeAll { it.expiresAt < now }
+        return cookies.toList()
+    }
+
+    @Synchronized
     fun clear() {
         cookies.clear()
         onPersist("[]")

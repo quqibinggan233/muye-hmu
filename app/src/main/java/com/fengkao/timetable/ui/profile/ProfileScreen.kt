@@ -58,7 +58,15 @@ fun ProfileScreen(
     val s = state.settings
     val student = state.schedule?.student
     val name = student?.name?.takeIf { it.isNotBlank() } ?: s.account.ifBlank { "当前用户" }
-    val studentId = student?.studentId?.takeIf { it.isNotBlank() } ?: s.account
+    val jwAccount = viewModel.savedJwUsername().takeIf { it.isNotBlank() }
+    val studentId = listOfNotNull(
+        student?.studentId?.takeIf {
+            it.isNotBlank() && !com.fengkao.timetable.data.model.StudentInfo.isPhoneNumber(it)
+        },
+        jwAccount,
+        student?.studentId?.takeIf { it.isNotBlank() },
+        s.account.takeIf { it.isNotBlank() },
+    ).firstOrNull().orEmpty()
     val term = state.term ?: TermCalculator.autoTerm()
     val start = viewModel.termStartOf(s, term)
     val today = TermCalculator.today()
@@ -194,10 +202,12 @@ fun ProfileScreen(
                     val yxySubtitle = when {
                         life.yixiaoyuanSignedIn && yxy.showBalanceCard && yxy.cardBalanceYuan != null ->
                             "已登录 · 余额 ¥%.2f".format(yxy.cardBalanceYuan)
+                        life.yixiaoyuanSignedIn && yxy.showerCode.isNotBlank() ->
+                            "已登录 · 用水码 ${yxy.formattedShowerCode()}"
                         life.yixiaoyuanSignedIn -> "已登录 · ${maskAccount(life.yixiaoyuanMobile)}"
                         yxy.showerCode.isNotBlank() -> "用水码 ${yxy.formattedShowerCode()}"
-                        yxy.hasCredential -> "已配 shiroJID · 点击刷新 8 位用水码"
-                        else -> "密码/短信登录查余额 · 8 位动态用水码"
+                        yxy.hasCredential -> "已配会话 · 点击刷新 8 位用水码"
+                        else -> "手机号密码直连登录 · 自动获取 8 位用水码"
                     }
                     SettingsSection {
                         AccountItem("喝水账户", Icons.Outlined.WaterDrop, maskAccount(water.phone), water.loggedIn, water.busy, { go(ProfilePage.WATER) }, divider = true)
@@ -221,6 +231,7 @@ fun ProfileScreen(
                     onLogout = lifeModel::logoutYixiaoyuan,
                     onRefreshBalance = lifeModel::refreshCardBalance,
                     onRefreshWaterCode = lifeModel::saveShiroJidAndRefresh,
+                    onGenerateWaterCode = { lifeModel.refreshShowerCode(forceGenerate = true) },
                     onToggleShowBalance = lifeModel::setShowYixiaoyuanBalance,
                     onSave = lifeModel::saveYixiaoyuanConfig,
                 )

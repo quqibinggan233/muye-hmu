@@ -7,6 +7,7 @@ import com.fengkao.timetable.TimetableApp
 import com.fengkao.timetable.data.xuexitong.NoticeExtract
 import com.fengkao.timetable.data.xuexitong.ScheduleChange
 import com.fengkao.timetable.data.xuexitong.TaskItem
+import com.fengkao.timetable.data.xuexitong.TaskKind
 import com.fengkao.timetable.data.xuexitong.TaskStatus
 import com.fengkao.timetable.data.xuexitong.XuexitongNotice
 import com.fengkao.timetable.data.xuexitong.XuexitongNoticeScheduler
@@ -42,11 +43,14 @@ data class XuexitongUiState(
     val loginAccount: String = "",
     val loginPassword: String = "",
 ) {
-    /** 首页卡正面要显示的「最近一件要交的事」；长期考试、已截止、已手动完成的都不算。 */
+    /** 首页卡正面要显示的「最近一件要交的事」；优先真实作业/考试，其次教学评价。 */
     val nextTask: TaskItem?
-        get() = tasks.firstOrNull {
-            !it.longWindow && it.key !in doneTaskKeys &&
-                (it.status == TaskStatus.URGENT || it.status == TaskStatus.OPEN)
+        get() {
+            val active = tasks.filter {
+                !it.longWindow && it.key !in doneTaskKeys &&
+                    (it.status == TaskStatus.URGENT || it.status == TaskStatus.OPEN)
+            }
+            return active.firstOrNull { it.kind != TaskKind.EVALUATION } ?: active.firstOrNull()
         }
 }
 
@@ -56,6 +60,8 @@ class XuexitongViewModel(application: Application) : AndroidViewModel(applicatio
     private val repository = (application as TimetableApp).container.xuexitong
     private val _state = MutableStateFlow(snapshot())
     val state = _state.asStateFlow()
+
+    fun webViewCookies(): List<okhttp3.Cookie> = repository.webViewCookies()
 
     private var lastAutoRefreshAt = 0L
 

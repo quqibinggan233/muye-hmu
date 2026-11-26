@@ -8,6 +8,7 @@ import com.fengkao.timetable.data.model.ChangeType
 import com.fengkao.timetable.data.model.CourseChange
 import com.fengkao.timetable.data.model.CachedSchedule
 import com.fengkao.timetable.data.model.CourseBlock
+import com.fengkao.timetable.data.model.StudentInfo
 import com.hmu.muye.data.jw.ChaoxingJwClient
 import com.hmu.muye.data.jw.ChaoxingJwStore
 import com.hmu.muye.data.jw.JwFetchResult
@@ -64,7 +65,19 @@ class ScheduleRepository(
                 if (s.periodTimesJson.isBlank() && payload.periodTimes.isNotEmpty()) {
                     settings.setPeriodTimes(payload.periodTimes)
                 }
-                return@withContext commitSchedule(payload.schedule, payload.term, onLog, fallbackMaxWeek = payload.maxWeek)
+                val jwInfo = fetchJwStudentIfAvailable(s.baseUrl)
+                val cachedStudent = cache.load()?.student
+                val jwFallback = StudentInfo(studentId = jwStore.username())
+                val mergedStudent = (jwInfo ?: StudentInfo())
+                    .mergedWith(jwFallback)
+                    .mergedWith(payload.schedule.student)
+                    .mergedWith(cachedStudent)
+                return@withContext commitSchedule(
+                    payload.schedule.copy(student = mergedStudent),
+                    payload.term,
+                    onLog,
+                    fallbackMaxWeek = payload.maxWeek,
+                )
             }.onFailure { err ->
                 if (cookies.isBlank()) {
                     return@withContext SyncOutcome.Failure(err.message ?: "学习通课表同步失败")
@@ -112,7 +125,11 @@ class ScheduleRepository(
                         settings.setTermStartEpochDay(termStart.toEpochDay(), target)
                     }
                 }
-                commitSchedule(result.data, target, onLog)
+                val cachedStudent = cache.load()?.student
+                val mergedSchedule = result.data.copy(
+                    student = result.data.student.mergedWith(cachedStudent),
+                )
+                commitSchedule(mergedSchedule, target, onLog)
             }
             is JwFetchResult.NeedWebLogin -> {
                 onLog(result.reason)
@@ -126,6 +143,41 @@ class ScheduleRepository(
                 onLog(result.message)
                 SyncOutcome.Failure(result.message)
             }
+        }
+    }
+
+    /**
+     * 尝试从超星教务拉取学籍信息并合并写入本地最新课表缓存，使「个人信息」立即完整可见。
+     */
+    suspend fun enrichStudentInfoIntoCache(): CachedSchedule? = withContext(Dispatchers.IO) {
+        val cached = cache.load() ?: return@withContext null
+        if (cached.student.isProfileComplete) return@withContext cached
+        val baseUrl = settings.first().baseUrl
+        val jwInfo = fetchJwStudentIfAvailable(baseUrl)
+        val jwUser = jwStore.username()
+        val mergedStudent = (jwInfo ?: StudentInfo(studentId = jwUser))
+            .mergedWith(StudentInfo(studentId = jwUser))
+            .mergedWith(cached.student)
+        if (mergedStudent == cached.student) return@withContext cached
+        val updated = cached.copy(student = mergedStudent)
+        cache.save(updated)
+        updated
+    }
+
+    private fun fetchJwStudentIfAvailable(rawBaseUrl: String): StudentInfo? {
+        val baseUrl = rawBaseUrl.ifBlank { ChaoxingJwStore.DEFAULT_JW_BASE }
+        val client = ChaoxingJwClient(baseUrl)
+        val cookies = jwStore.cookies().ifBlank {
+            refreshJwSessionQuietly(client, baseUrl) {}.orEmpty()
+        }
+        if (cookies.isBlank()) return null
+        return when (val res = client.fetchStudentInfo(cookies)) {
+            is JwFetchResult.Success -> res.data
+            is JwFetchResult.NeedWebLogin -> {
+                val renewed = refreshJwSessionQuietly(client, baseUrl) {} ?: return null
+                (client.fetchStudentInfo(renewed) as? JwFetchResult.Success)?.data
+            }
+            else -> null
         }
     }
 

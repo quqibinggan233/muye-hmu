@@ -55,6 +55,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.fengkao.timetable.data.model.CourseBlock
@@ -63,6 +64,7 @@ import com.fengkao.timetable.data.xuexitong.NoticeExtract
 import com.fengkao.timetable.data.xuexitong.NoticeFormat
 import com.fengkao.timetable.data.xuexitong.ScheduleChange
 import com.fengkao.timetable.data.xuexitong.TaskItem
+import com.fengkao.timetable.data.xuexitong.TaskKind
 import com.fengkao.timetable.ui.glass.liquidPress
 import com.fengkao.timetable.data.xuexitong.TaskStatus
 import com.fengkao.timetable.data.xuexitong.XuexitongNotice
@@ -72,15 +74,23 @@ private enum class NoticeFilter(val label: String) {
     ALL("全部"),
     UNREAD("未读"),
     HOMEWORK("作业/测验"),
+    EVALUATION("教学评价"),
     SIGNIN("签到"),
     ANNOUNCEMENT("课程公告"),
     ARCHIVED("归档"),
 }
 
+private enum class TodoFilter(val label: String) {
+    ALL("全部"),
+    STUDY("作业/考试"),
+    EVALUATION("教学评价"),
+    DONE("已完成"),
+}
+
 private enum class SheetTab(val label: String) {
     TODO("待办"),
+    RAW("通知"),
     CHANGE("课表异动"),
-    RAW("通知原文"),
 }
 
 /** 关键字匹配：课程名、标题、正文、发送者、附件名任一命中即可（不区分大小写）。 */
@@ -148,51 +158,11 @@ fun NoticeCenterSheet(
     onArchiveRead: () -> Unit,
     onTaskDone: (String, Boolean) -> Unit,
     onConnect: () -> Unit,
-    onOpenChaoxing: () -> Unit,
+    onOpenChaoxing: (XuexitongLaunchTarget) -> Unit,
+    onOpenUrl: (title: String, url: String) -> Unit,
     onApplyChange: (ScheduleChange) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var tab by rememberSaveable { mutableStateOf(SheetTab.TODO) }
-    var filter by rememberSaveable { mutableStateOf(NoticeFilter.ALL) }
-    var query by rememberSaveable { mutableStateOf("") }
-    var expandedId by rememberSaveable { mutableStateOf<String?>(null) }
-
-    fun isUnread(notice: XuexitongNotice) =
-        notice.serverUnread && notice.id !in locallyReadIds
-
-    val keyword = query.trim()
-
-    // 归档是「收起来」，不是「删掉」：默认三层视图都看不到，只有「归档」筛选能翻出来。
-    val activeNotices = remember(notices, archivedIds) {
-        notices.filter { it.id !in archivedIds }
-    }
-    val archivedNotices = remember(notices, archivedIds) {
-        notices.filter { it.id in archivedIds }
-    }
-
-    // 派生数据只算一次：42 条通知的抽取在真机上约 1~2ms，但不能跟着搜索框每次重算
-    val tasks = remember(activeNotices, now) { NoticeExtract.buildTasks(activeNotices, now) }
-    val changes = remember(activeNotices) { NoticeExtract.buildChanges(activeNotices) }
-    val visibleTasks = remember(tasks, keyword, doneTaskKeys) {
-        val matched = if (keyword.isEmpty()) tasks else tasks.filter { it.matches(keyword) }
-        // 已完成的沉到最后：未完成的那几件才是这一页要回答的问题
-        matched.sortedBy { if (it.key in doneTaskKeys) 1 else 0 }
-    }
-    val visibleChanges = remember(changes, keyword) {
-        if (keyword.isEmpty()) changes else changes.filter { it.matches(keyword) }
-    }
-
-    val filtered = remember(activeNotices, archivedNotices, filter, locallyReadIds, keyword) {
-        val byCategory = when (filter) {
-            NoticeFilter.ALL -> activeNotices
-            NoticeFilter.UNREAD -> activeNotices.filter { it.serverUnread && it.id !in locallyReadIds }
-            NoticeFilter.HOMEWORK -> activeNotices.filter { it.category == NoticeCategory.HOMEWORK }
-            NoticeFilter.SIGNIN -> activeNotices.filter { it.category == NoticeCategory.SIGNIN }
-            NoticeFilter.ANNOUNCEMENT -> activeNotices.filter { it.category == NoticeCategory.ANNOUNCEMENT }
-            NoticeFilter.ARCHIVED -> archivedNotices
-        }
-        if (keyword.isEmpty()) byCategory else byCategory.filter { it.matches(keyword) }
-    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -212,17 +182,140 @@ fun NoticeCenterSheet(
             }
         },
     ) {
-        Column(Modifier.fillMaxWidth().fillMaxHeight(0.80f)) {
+        NoticeCenterPanel(
+            notices = notices,
+            locallyReadIds = locallyReadIds,
+            archivedIds = archivedIds,
+            doneTaskKeys = doneTaskKeys,
+            unreadCount = unreadCount,
+            lastFetchAt = lastFetchAt,
+            loggedIn = loggedIn,
+            sessionExpired = sessionExpired,
+            busy = busy,
+            courses = courses,
+            now = now,
+            embedded = false,
+            contentBottomPadding = 24.dp,
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.84f),
+            onRefresh = onRefresh,
+            onMarkAllRead = onMarkAllRead,
+            onMarkRead = onMarkRead,
+            onArchive = onArchive,
+            onUnarchive = onUnarchive,
+            onArchiveRead = onArchiveRead,
+            onTaskDone = onTaskDone,
+            onConnect = onConnect,
+            onOpenChaoxing = onOpenChaoxing,
+            onOpenUrl = onOpenUrl,
+            onApplyChange = onApplyChange,
+        )
+    }
+}
+
+/**
+ * 统一的学习通通知与作业中心主体面板。
+ *
+ * 既可直接嵌入「学习 → 学习通」首页标签，也可被首页通知卡的通知抽屉复用：
+ * 顶栏状态 + 搜索 + 三段视图（待办 / 通知 / 课表异动），「作业与测验」与「教学评价」分区归类，
+ * 点击任意卡片或「直达」按钮均可在内置带登录态页面打开原页面或跳往学习通 App。
+ */
+@Composable
+fun NoticeCenterPanel(
+    notices: List<XuexitongNotice>,
+    locallyReadIds: Set<String>,
+    archivedIds: Set<String>,
+    doneTaskKeys: Set<String>,
+    unreadCount: Int,
+    lastFetchAt: Long,
+    loggedIn: Boolean,
+    sessionExpired: Boolean,
+    busy: Boolean,
+    courses: List<CourseBlock>,
+    now: Long,
+    embedded: Boolean = false,
+    contentBottomPadding: Dp = 24.dp,
+    modifier: Modifier = Modifier,
+    onRefresh: () -> Unit,
+    onMarkAllRead: () -> Unit,
+    onMarkRead: (String) -> Unit,
+    onArchive: (String) -> Unit,
+    onUnarchive: (String) -> Unit,
+    onArchiveRead: () -> Unit,
+    onTaskDone: (String, Boolean) -> Unit,
+    onConnect: () -> Unit,
+    onOpenChaoxing: (XuexitongLaunchTarget) -> Unit,
+    onOpenUrl: (title: String, url: String) -> Unit,
+    onApplyChange: (ScheduleChange) -> Unit,
+) {
+    var tab by rememberSaveable { mutableStateOf(SheetTab.TODO) }
+    var todoFilter by rememberSaveable { mutableStateOf(TodoFilter.ALL) }
+    var filter by rememberSaveable { mutableStateOf(NoticeFilter.ALL) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var expandedId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedTask by remember { mutableStateOf<TaskItem?>(null) }
+    val horizontalPad = if (embedded) 16.dp else 20.dp
+
+    fun isUnread(notice: XuexitongNotice) =
+        notice.serverUnread && notice.id !in locallyReadIds
+
+    val keyword = query.trim()
+
+    val activeNotices = remember(notices, archivedIds) {
+        notices.filter { it.id !in archivedIds }
+    }
+    val archivedNotices = remember(notices, archivedIds) {
+        notices.filter { it.id in archivedIds }
+    }
+
+    val tasks = remember(activeNotices, now) { NoticeExtract.buildTasks(activeNotices, now) }
+    val changes = remember(activeNotices) { NoticeExtract.buildChanges(activeNotices) }
+    val matchedTasks = remember(tasks, keyword) {
+        if (keyword.isEmpty()) tasks else tasks.filter { it.matches(keyword) }
+    }
+    val openTasks = remember(matchedTasks, doneTaskKeys) {
+        matchedTasks.filter { it.key !in doneTaskKeys }
+    }
+    val studyTasks = remember(openTasks) {
+        openTasks.filter { it.kind != TaskKind.EVALUATION }
+    }
+    val evalTasks = remember(openTasks) {
+        openTasks.filter { it.kind == TaskKind.EVALUATION }
+    }
+    val doneTasks = remember(matchedTasks, doneTaskKeys) {
+        matchedTasks.filter { it.key in doneTaskKeys }
+    }
+    val visibleChanges = remember(changes, keyword) {
+        if (keyword.isEmpty()) changes else changes.filter { it.matches(keyword) }
+    }
+
+    val filtered = remember(activeNotices, archivedNotices, filter, locallyReadIds, keyword) {
+        val byCategory = when (filter) {
+            NoticeFilter.ALL -> activeNotices
+            NoticeFilter.UNREAD -> activeNotices.filter { it.serverUnread && it.id !in locallyReadIds }
+            NoticeFilter.HOMEWORK -> activeNotices.filter { it.category == NoticeCategory.HOMEWORK }
+            NoticeFilter.EVALUATION -> activeNotices.filter { it.category == NoticeCategory.EVALUATION }
+            NoticeFilter.SIGNIN -> activeNotices.filter { it.category == NoticeCategory.SIGNIN }
+            NoticeFilter.ANNOUNCEMENT -> activeNotices.filter { it.category == NoticeCategory.ANNOUNCEMENT }
+            NoticeFilter.ARCHIVED -> archivedNotices
+        }
+        if (keyword.isEmpty()) byCategory else byCategory.filter { it.matches(keyword) }
+    }
+
+    val studyTodoCount = tasks.count { it.key !in doneTaskKeys && it.kind != TaskKind.EVALUATION && it.status != TaskStatus.CLOSED }
+    val evalTodoCount = tasks.count { it.key !in doneTaskKeys && it.kind == TaskKind.EVALUATION && it.status != TaskStatus.CLOSED }
+
+    Column(modifier) {
+        if (!embedded) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
+                    .padding(horizontal = horizontalPad)
                     .padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Text(
-                    "通知中心",
+                    "通知与作业中心",
                     color = NoticeInk,
                     fontSize = 18.sp,
                     lineHeight = 24.sp,
@@ -230,12 +323,9 @@ fun NoticeCenterSheet(
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis,
-                    // 只给标题权重：若与 Spacer 平分剩余宽度，360dp 屏上标题会被裁掉一半。
                     modifier = Modifier.weight(1f),
                 )
                 if (unreadCount > 0) {
-                    // 圆形徽标：靠 padding 撑出来的圆在数字位数变化时会变椭圆，
-                    // 直接钉死 18dp 方形 + 居中，1~2 位数都是正圆。
                     Box(
                         Modifier
                             .size(18.dp)
@@ -247,20 +337,19 @@ fun NoticeCenterSheet(
                             "$unreadCount",
                             color = Color.White,
                             fontSize = 11.sp,
-                            // 行盒必须显式给：继承 bodyLarge 的 24sp 会被 18dp 的方框裁掉
                             lineHeight = 14.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             softWrap = false,
                         )
                     }
+                    NoticeChipButton(label = "全部已读", onClick = onMarkAllRead)
                 }
-                // 抓取时间：11.5px，紧贴「全部已读」左侧，永不参与折行
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .liquidPress(enabled = loggedIn && !busy, onClick = onRefresh)
-                        .padding(horizontal = 2.dp, vertical = 4.dp),
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -280,255 +369,462 @@ fun NoticeCenterSheet(
                     )
                 }
             }
-
-            Spacer(Modifier.height(12.dp))
-
-            // 关键字搜索：在分类之上再过滤一次（课程名 / 标题 / 正文 / 发送者 / 附件名）
+            Spacer(Modifier.height(10.dp))
+        } else if (loggedIn) {
+            val statusSummary = buildString {
+                append("待办 ").append(studyTodoCount)
+                if (evalTodoCount > 0) append(" · 评价 ").append(evalTodoCount)
+                append(" · 未读 ").append(unreadCount)
+            }
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .height(40.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(NoticeCard)
-                    .border(1.dp, NoticeHairline, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 11.dp),
+                    .padding(horizontal = horizontalPad),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(
-                    Icons.Outlined.Search,
-                    null,
-                    tint = NoticeFaint,
-                    modifier = Modifier.size(16.dp),
+                Text(
+                    statusSummary,
+                    color = NoticeMeta,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
-                Spacer(Modifier.width(7.dp))
-                // 自绘输入框：M3 TextField 有 56dp 最小高度，会被 40dp 容器裁掉文字
-                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    if (query.isEmpty()) {
-                        // #A0AEC0 在 #FFFFFF 上只有 2.12:1，占位符也是正文级信息。
-                        Text("搜索课程、作业或关键字", color = NoticeMeta, fontSize = 12.5.sp, lineHeight = 17.sp, maxLines = 1)
-                    }
-                    BasicTextField(
-                        value = query,
-                        onValueChange = { query = it },
-                        singleLine = true,
-                        textStyle = TextStyle(color = NoticeInk, fontSize = 12.5.sp, lineHeight = 17.sp),
-                        cursorBrush = SolidColor(NoticeBlue),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                if (unreadCount > 0) {
+                    NoticeChipButton(label = "全部已读", onClick = onMarkAllRead)
                 }
-                if (query.isNotEmpty()) {
-                    Icon(
-                        Icons.Outlined.Close,
-                        "清空搜索",
-                        tint = NoticeFaint,
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clip(CircleShape)
-                            .liquidPress(pressedScale = 0.9f) { query = "" },
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(12.dp))
-
-            // 三层视图切换：默认落在「待办」——用户要办的事，而不是通知流水
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(NoticeCard)
-                    .border(1.dp, NoticeHairline, RoundedCornerShape(12.dp))
-                    .padding(3.dp),
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                SheetTab.entries.forEach { item ->
-                    val selected = tab == item
-                    val count = when (item) {
-                        SheetTab.TODO -> visibleTasks.count { it.status != TaskStatus.CLOSED }
-                        SheetTab.CHANGE -> visibleChanges.size
-                        SheetTab.RAW -> filtered.size
-                    }
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (selected) NoticeBlueSoft else Color.Transparent)
-                            // 分段控件属于玻璃体系：只要颜色切换，不要 MD 的灰 state layer
-                            .liquidPress(pressedScale = 1f) { tab = item }
-                            .padding(vertical = 8.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            if (count > 0) "${item.label} $count" else item.label,
-                            color = if (selected) NoticeBlue else NoticeMeta,
-                            fontSize = 12.5.sp,
-                            lineHeight = 17.sp,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            }
-
-            // 分类筛选只在「通知原文」有意义：待办与异动已经按类型组织过了
-            if (tab == SheetTab.RAW) {
-                Spacer(Modifier.height(10.dp))
                 Row(
                     Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        .clip(RoundedCornerShape(8.dp))
+                        .liquidPress(enabled = !busy, onClick = onRefresh)
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    NoticeFilter.entries.forEach { item ->
-                        FilterPill(
-                            label = if (item == NoticeFilter.UNREAD) "未读 $unreadCount" else item.label,
-                            selected = filter == item,
-                            onClick = { filter = item },
-                        )
-                    }
+                    Text(
+                        if (busy) "抓取中…" else NoticeFormat.fetchAge(lastFetchAt),
+                        color = NoticeMeta,
+                        fontSize = 11.5.sp,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Icon(
+                        Icons.Outlined.Refresh,
+                        "刷新通知",
+                        tint = BrandGreen,
+                        modifier = Modifier.size(14.dp),
+                    )
                 }
             }
+            Spacer(Modifier.height(8.dp))
+        }
 
-            Spacer(Modifier.height(12.dp))
+        // 关键字搜索
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = horizontalPad)
+                .height(40.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(NoticeCard)
+                .border(1.dp, NoticeHairline, RoundedCornerShape(12.dp))
+                .padding(horizontal = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Outlined.Search,
+                null,
+                tint = NoticeFaint,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(7.dp))
+            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                if (query.isEmpty()) {
+                    Text("搜索课程、作业、评价或关键字", color = NoticeMeta, fontSize = 12.5.sp, lineHeight = 17.sp, maxLines = 1)
+                }
+                BasicTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    textStyle = TextStyle(color = NoticeInk, fontSize = 12.5.sp, lineHeight = 17.sp),
+                    cursorBrush = SolidColor(NoticeBlue),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (query.isNotEmpty()) {
+                Icon(
+                    Icons.Outlined.Close,
+                    "清空搜索",
+                    tint = NoticeFaint,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clip(CircleShape)
+                        .liquidPress(pressedScale = 0.9f) { query = "" },
+                )
+            }
+        }
 
-            when {
-                !loggedIn -> Box(Modifier.fillMaxWidth().weight(1f)) { ConnectState(onConnect = onConnect) }
-                tab == SheetTab.TODO -> if (visibleTasks.isEmpty()) {
+        Spacer(Modifier.height(10.dp))
+
+        // 三段主视图：待办 / 通知 / 课表异动
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = horizontalPad)
+                .clip(RoundedCornerShape(12.dp))
+                .background(NoticeCard)
+                .border(1.dp, NoticeHairline, RoundedCornerShape(12.dp))
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            SheetTab.entries.forEach { item ->
+                val selected = tab == item
+                val count = when (item) {
+                    SheetTab.TODO -> openTasks.count { it.status != TaskStatus.CLOSED }
+                    SheetTab.RAW -> filtered.size
+                    SheetTab.CHANGE -> visibleChanges.size
+                }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (selected) NoticeBlueSoft else Color.Transparent)
+                        .liquidPress(pressedScale = 1f) { tab = item }
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (count > 0) "${item.label} $count" else item.label,
+                        color = if (selected) NoticeBlue else NoticeMeta,
+                        fontSize = 12.5.sp,
+                        lineHeight = 17.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+
+        if (tab == SheetTab.TODO && loggedIn && (evalTasks.isNotEmpty() || doneTasks.isNotEmpty())) {
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = horizontalPad),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                FilterPill(
+                    label = "全部",
+                    selected = todoFilter == TodoFilter.ALL,
+                    onClick = { todoFilter = TodoFilter.ALL },
+                )
+                FilterPill(
+                    label = if (studyTasks.isNotEmpty()) "作业/考试 ${studyTasks.size}" else "作业/考试",
+                    selected = todoFilter == TodoFilter.STUDY,
+                    onClick = { todoFilter = TodoFilter.STUDY },
+                )
+                if (evalTasks.isNotEmpty()) {
+                    FilterPill(
+                        label = "教学评价 ${evalTasks.size}",
+                        selected = todoFilter == TodoFilter.EVALUATION,
+                        onClick = { todoFilter = TodoFilter.EVALUATION },
+                    )
+                }
+                if (doneTasks.isNotEmpty()) {
+                    FilterPill(
+                        label = "已完成 ${doneTasks.size}",
+                        selected = todoFilter == TodoFilter.DONE,
+                        onClick = { todoFilter = TodoFilter.DONE },
+                    )
+                }
+            }
+        }
+
+        if (tab == SheetTab.RAW) {
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = horizontalPad),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                NoticeFilter.entries.forEach { item ->
+                    FilterPill(
+                        label = if (item == NoticeFilter.UNREAD) "未读 $unreadCount" else item.label,
+                        selected = filter == item,
+                        onClick = { filter = item },
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        when {
+            !loggedIn -> Box(Modifier.fillMaxWidth().weight(1f)) { ConnectState(onConnect = onConnect) }
+
+            tab == SheetTab.TODO -> {
+                val showEmpty = when (todoFilter) {
+                    TodoFilter.ALL -> matchedTasks.isEmpty()
+                    TodoFilter.STUDY -> studyTasks.isEmpty()
+                    TodoFilter.EVALUATION -> evalTasks.isEmpty()
+                    TodoFilter.DONE -> doneTasks.isEmpty()
+                }
+                if (showEmpty) {
                     Box(Modifier.fillMaxWidth().weight(1f)) {
                         EmptyState(
-                            text = if (keyword.isNotEmpty()) "没有匹配「$keyword」的待办" else "没有待办",
+                            text = if (keyword.isNotEmpty()) "没有匹配「$keyword」的待办" else "暂无待办事项",
                             hint = if (keyword.isNotEmpty()) {
                                 "换个关键字，或点搜索框右侧 × 清空"
                             } else {
-                                "学习通里有作业、考试时会自动汇总到这里"
+                                "学习通有新作业、测验或教学评价时会自动汇总到这里"
                             },
                         )
                     }
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxWidth().weight(1f),
-                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(start = horizontalPad, end = horizontalPad, bottom = contentBottomPadding),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         if (sessionExpired) {
                             item { SessionExpiredBanner(onConnect = onConnect) }
                         }
-                        items(visibleTasks, key = { it.key }) { task ->
-                            val done = task.key in doneTaskKeys
-                            TaskCard(
-                                task = task,
-                                courses = courses,
-                                now = now,
-                                done = done,
-                                onOpenChaoxing = onOpenChaoxing,
-                                onToggleDone = { onTaskDone(task.key, !done) },
-                            )
+                        if ((todoFilter == TodoFilter.ALL || todoFilter == TodoFilter.STUDY) && studyTasks.isNotEmpty()) {
+                            if (todoFilter == TodoFilter.ALL && evalTasks.isNotEmpty()) {
+                                item(key = "hdr-study") { SectionGroupHeader("作业与测验", studyTasks.size) }
+                            }
+                            items(studyTasks, key = { it.key }) { task ->
+                                val targetUrl = task.latest.attachmentUrl.ifBlank { XuexitongLauncher.WEB_NOTICE }
+                                val pageTitle = task.title.ifBlank { "任务详情" }
+                                TaskCard(
+                                    task = task,
+                                    courses = courses,
+                                    now = now,
+                                    done = false,
+                                    onOpenChaoxing = {
+                                        onOpenChaoxing(
+                                            XuexitongLaunchTarget.fromNotice(task.latest, titleOverride = pageTitle)
+                                        )
+                                    },
+                                    onToggleDone = { onTaskDone(task.key, true) },
+                                    onClick = { selectedTask = task },
+                                    onOpenTarget = if (task.latest.attachmentUrl.isNotBlank()) {
+                                        { onOpenUrl(pageTitle, targetUrl) }
+                                    } else null,
+                                )
+                            }
                         }
-                        item {
-                            SheetFooter(
-                                if (doneTaskKeys.isEmpty()) {
-                                    "已合并同一份作业的多条提醒 · 截止时间来自学习通原文"
+                        if ((todoFilter == TodoFilter.ALL || todoFilter == TodoFilter.EVALUATION) && evalTasks.isNotEmpty()) {
+                            if (todoFilter == TodoFilter.ALL) {
+                                item(key = "hdr-eval") { SectionGroupHeader("课堂教学评价", evalTasks.size) }
+                            }
+                            items(evalTasks, key = { it.key }) { task ->
+                                val targetUrl = task.latest.attachmentUrl.ifBlank { XuexitongLauncher.WEB_NOTICE }
+                                val displayTitle = NoticeFormat.shortCourse(task.courseName).ifBlank { task.title }
+                                TaskCard(
+                                    task = task,
+                                    courses = courses,
+                                    now = now,
+                                    done = false,
+                                    onOpenChaoxing = {
+                                        onOpenChaoxing(
+                                            XuexitongLaunchTarget.fromNotice(task.latest, titleOverride = displayTitle)
+                                        )
+                                    },
+                                    onToggleDone = { onTaskDone(task.key, true) },
+                                    onClick = { selectedTask = task },
+                                    onOpenTarget = if (task.latest.attachmentUrl.isNotBlank()) {
+                                        { onOpenUrl(displayTitle, targetUrl) }
+                                    } else null,
+                                )
+                            }
+                        }
+                        if ((todoFilter == TodoFilter.ALL || todoFilter == TodoFilter.DONE) && doneTasks.isNotEmpty()) {
+                            if (todoFilter == TodoFilter.ALL) {
+                                item(key = "hdr-done") { SectionGroupHeader("已完成", doneTasks.size) }
+                            }
+                            items(doneTasks, key = { it.key }) { task ->
+                                val targetUrl = task.latest.attachmentUrl.ifBlank { XuexitongLauncher.WEB_NOTICE }
+                                val pageTitle = if (task.kind == TaskKind.EVALUATION) {
+                                    NoticeFormat.shortCourse(task.courseName).ifBlank { task.title }
                                 } else {
-                                    "已完成 ${doneTaskKeys.size} 件会沉到列表底部 · 仅保存在本机"
+                                    task.title.ifBlank { "任务详情" }
                                 }
-                            )
-                        }
-                    }
-                }
-
-                tab == SheetTab.CHANGE -> if (visibleChanges.isEmpty()) {
-                    Box(Modifier.fillMaxWidth().weight(1f)) {
-                        EmptyState(
-                            text = "没有课表异动",
-                            hint = "调课、停课、补课类公告会汇总到这里",
-                        )
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        if (sessionExpired) {
-                            item { SessionExpiredBanner(onConnect = onConnect) }
-                        }
-                        items(visibleChanges, key = { "change-${it.noticeId}" }) { change ->
-                            ChangeCard(
-                                change = change,
-                                onApply = { onApplyChange(change) },
-                                onOpenChaoxing = onOpenChaoxing,
-                            )
+                                TaskCard(
+                                    task = task,
+                                    courses = courses,
+                                    now = now,
+                                    done = true,
+                                    onOpenChaoxing = {
+                                        onOpenChaoxing(
+                                            XuexitongLaunchTarget.fromNotice(task.latest, titleOverride = pageTitle)
+                                        )
+                                    },
+                                    onToggleDone = { onTaskDone(task.key, false) },
+                                    onClick = { selectedTask = task },
+                                    onOpenTarget = if (task.latest.attachmentUrl.isNotBlank()) {
+                                        { onOpenUrl(pageTitle, targetUrl) }
+                                    } else null,
+                                )
+                            }
                         }
                         item {
-                            SheetFooter(
-                                "只有明确写清「改到哪天第几节」的公告才提供改课表；" +
-                                    "互调与停课需自行确认"
-                            )
+                            SheetFooter("点击卡片看正文，「直达 ↗」在内置带登录态页面打开 · 已合并同一任务的多条提醒")
                         }
                     }
                 }
+            }
 
-                filtered.isEmpty() -> Box(Modifier.fillMaxWidth().weight(1f)) {
+            tab == SheetTab.CHANGE -> if (visibleChanges.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f)) {
                     EmptyState(
-                        text = when {
-                            keyword.isNotEmpty() -> "没有匹配「$keyword」的通知"
-                            notices.isEmpty() -> "暂无学习通通知"
-                            else -> "当前分类暂无通知"
-                        },
-                        hint = when {
-                            keyword.isNotEmpty() -> "换个关键字，或点搜索框右侧 × 清空"
-                            notices.isEmpty() -> "有新的作业、签到或公告时会自动出现在这里"
-                            else -> null
-                        },
+                        text = "没有课表异动",
+                        hint = "调课、停课、补课类公告会汇总到这里",
                     )
                 }
-
-                else -> LazyColumn(
+            } else {
+                LazyColumn(
                     modifier = Modifier.fillMaxWidth().weight(1f),
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
+                    contentPadding = PaddingValues(start = horizontalPad, end = horizontalPad, bottom = contentBottomPadding),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     if (sessionExpired) {
                         item { SessionExpiredBanner(onConnect = onConnect) }
                     }
-                    items(filtered, key = { it.id }) { notice ->
-                        val archived = notice.id in archivedIds
-                        NoticeItemCard(
-                            notice = notice,
-                            courses = courses,
-                            unread = isUnread(notice),
-                            expanded = expandedId == notice.id,
-                            archived = archived,
-                            onToggle = {
-                                if (expandedId == notice.id) {
-                                    expandedId = null
-                                } else {
-                                    expandedId = notice.id
-                                    if (isUnread(notice)) onMarkRead(notice.id)
-                                }
+                    items(visibleChanges, key = { "change-${it.noticeId}" }) { change ->
+                        ChangeCard(
+                            change = change,
+                            onApply = { onApplyChange(change) },
+                            onOpenChaoxing = {
+                                onOpenChaoxing(XuexitongLaunchTarget.fromNotice(change.notice))
                             },
-                            onMarkRead = { onMarkRead(notice.id) },
-                            onArchive = { onArchive(notice.id) },
-                            onUnarchive = { onUnarchive(notice.id) },
-                            onOpenChaoxing = onOpenChaoxing,
                         )
                     }
                     item {
-                        // 归档是「把读完的收起来」，不删数据：还原入口就在「归档」筛选里。
-                        NoticeChipButton(
-                            label = "归档全部已读",
-                            onClick = onArchiveRead,
+                        SheetFooter(
+                            "只有明确写清「改到哪天第几节」的公告才提供改课表；" +
+                                "互调与停课需自行确认"
                         )
                     }
-                    item { SheetFooter("已读与归档仅保存在本机 · 通知内容来自学习通通知中心") }
                 }
             }
+
+            filtered.isEmpty() -> Box(Modifier.fillMaxWidth().weight(1f)) {
+                EmptyState(
+                    text = when {
+                        keyword.isNotEmpty() -> "没有匹配「$keyword」的通知"
+                        notices.isEmpty() -> "暂无学习通通知"
+                        else -> "当前分类暂无通知"
+                    },
+                    hint = when {
+                        keyword.isNotEmpty() -> "换个关键字，或点搜索框右侧 × 清空"
+                        notices.isEmpty() -> "有新的作业、签到或公告时会自动出现在这里"
+                        else -> null
+                    },
+                )
+            }
+
+            else -> LazyColumn(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                contentPadding = PaddingValues(start = horizontalPad, end = horizontalPad, bottom = contentBottomPadding),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (sessionExpired) {
+                    item { SessionExpiredBanner(onConnect = onConnect) }
+                }
+                items(filtered, key = { it.id }) { notice ->
+                    val archived = notice.id in archivedIds
+                    val targetUrl = notice.attachmentUrl.ifBlank { XuexitongLauncher.WEB_NOTICE }
+                    val cleanTitle = NoticeFormat.cleanTitle(notice.title, notice.category).ifBlank { "学习通通知" }
+                    NoticeItemCard(
+                        notice = notice,
+                        courses = courses,
+                        unread = isUnread(notice),
+                        expanded = expandedId == notice.id,
+                        archived = archived,
+                        onToggle = {
+                            if (expandedId == notice.id) {
+                                expandedId = null
+                            } else {
+                                expandedId = notice.id
+                                if (isUnread(notice)) onMarkRead(notice.id)
+                            }
+                        },
+                        onMarkRead = { onMarkRead(notice.id) },
+                        onArchive = { onArchive(notice.id) },
+                        onUnarchive = { onUnarchive(notice.id) },
+                        onOpenDirect = { onOpenUrl(cleanTitle, targetUrl) },
+                        onOpenChaoxing = {
+                            onOpenChaoxing(XuexitongLaunchTarget.fromNotice(notice, titleOverride = cleanTitle))
+                        },
+                    )
+                }
+                item {
+                    NoticeChipButton(
+                        label = "归档全部已读",
+                        onClick = onArchiveRead,
+                    )
+                }
+                item { SheetFooter("点击展开可直达学习通 App 或内置带登录态页面查看详情 · 已读与归档仅保存在本机") }
+            }
         }
+    }
+
+    selectedTask?.let { task ->
+        val done = task.key in doneTaskKeys
+        val targetUrl = task.latest.attachmentUrl.ifBlank { XuexitongLauncher.WEB_NOTICE }
+        val pageTitle = if (task.kind == TaskKind.EVALUATION) {
+            NoticeFormat.shortCourse(task.courseName).ifBlank { task.title }
+        } else {
+            task.title
+        }
+        TaskDetailDialog(
+            task = task,
+            done = done,
+            onDismiss = { selectedTask = null },
+            onToggleDone = {
+                onTaskDone(task.key, !done)
+                selectedTask = null
+            },
+            onOpenDirect = {
+                selectedTask = null
+                onOpenUrl(pageTitle, targetUrl)
+            },
+            onOpenChaoxing = {
+                selectedTask = null
+                onOpenChaoxing(XuexitongLaunchTarget.fromNotice(task.latest, titleOverride = pageTitle))
+            },
+        )
+    }
+}
+
+@Composable
+private fun SectionGroupHeader(title: String, count: Int) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            color = NoticeSub,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            "$count",
+            color = NoticeMeta,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 
@@ -645,6 +941,7 @@ private fun NoticeItemCard(
     onMarkRead: () -> Unit,
     onArchive: () -> Unit,
     onUnarchive: () -> Unit,
+    onOpenDirect: () -> Unit,
     onOpenChaoxing: () -> Unit,
 ) {
     val visual = noticeCourseVisual(notice, courses)
@@ -726,37 +1023,32 @@ private fun NoticeItemCard(
             ) {
                 Box(Modifier.padding(top = 8.dp)) { DeadlineChip(notice.deadline.orEmpty()) }
             }
-            // 底部同行：左附件 / 右操作按钮，避免多占一行高度
             Spacer(Modifier.height(10.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val attachment = notice.attachmentName.takeIf { it.isNotBlank() }
-                if (attachment != null) {
-                    Text(
-                        buildString {
-                            append("📎 ")
-                            append(attachment)
-                            if (notice.attachmentSize.isNotBlank()) append("（${notice.attachmentSize}）")
-                        },
-                        color = NoticeBlue,
-                        fontSize = 11.sp,
-                        lineHeight = 16.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                } else {
-                    Spacer(Modifier.width(0.dp))
+            val hasAttachment = notice.attachmentName.isNotBlank()
+            if (expanded) {
+                if (hasAttachment) {
+                    AttachmentLabel(notice, Modifier.fillMaxWidth().padding(bottom = 8.dp))
                 }
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 归档 / 已读是「整理」动作，用描边次级按钮；
-                    // 去学习通是主操作，保持浅蓝实底，视线自然落在最右。
+                    Text(
+                        "去学习通",
+                        color = BrandGreen,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(NoticeCapsule)
+                            .liquidPress(pressedScale = 0.94f, onClick = onOpenChaoxing)
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
+                    DirectPageChip(onClick = onOpenDirect)
                     NoticeChipButton(
                         label = if (archived) "还原" else "归档",
                         onClick = if (archived) onUnarchive else onArchive,
@@ -765,9 +1057,72 @@ private fun NoticeItemCard(
                         NoticeChipButton(label = "已读", onClick = onMarkRead)
                     }
                 }
+            } else {
+                // 未展开时保持单行紧凑布局：左附件 / 右操作按钮
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (hasAttachment) {
+                        AttachmentLabel(notice, Modifier.weight(1f, fill = false))
+                    } else {
+                        Spacer(Modifier.width(0.dp))
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (notice.attachmentUrl.isNotBlank()) {
+                            DirectPageChip(onClick = onOpenDirect)
+                        }
+                        NoticeChipButton(
+                            label = if (archived) "还原" else "归档",
+                            onClick = if (archived) onUnarchive else onArchive,
+                        )
+                        if (unread) {
+                            NoticeChipButton(label = "已读", onClick = onMarkRead)
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun AttachmentLabel(notice: XuexitongNotice, modifier: Modifier = Modifier) {
+    Text(
+        buildString {
+            append("📎 ")
+            append(notice.attachmentName)
+            if (notice.attachmentSize.isNotBlank()) append("（${notice.attachmentSize}）")
+        },
+        color = NoticeBlue,
+        fontSize = 11.sp,
+        lineHeight = 16.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun DirectPageChip(onClick: () -> Unit) {
+    Text(
+        "打开原页面 ↗",
+        color = NoticeBlue,
+        fontSize = 11.sp,
+        lineHeight = 15.sp,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        softWrap = false,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(NoticeBlueSoft)
+            .liquidPress(pressedScale = 0.94f, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    )
 }
 
 @Composable

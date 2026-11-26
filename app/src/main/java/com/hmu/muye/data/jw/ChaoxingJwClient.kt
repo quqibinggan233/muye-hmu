@@ -267,7 +267,29 @@ class ChaoxingJwClient(
         }
         val parsed = parseChaoxingSdpkkbJson(raw, account.ifBlank { xhid }, term)
             ?: return JwFetchResult.Error("课表数据格式解析失败，请稍后重试")
-        return JwFetchResult.Success(parsed)
+        val profile = (fetchStudentInfo(cookies) as? JwFetchResult.Success)?.data
+        val enriched = if (profile != null) {
+            parsed.copy(student = profile.mergedWith(parsed.student))
+        } else {
+            parsed
+        }
+        return JwFetchResult.Success(enriched)
+    }
+
+    /** 拉取超星教务学生学籍信息（姓名 / 学号 / 年级 / 学院 / 专业 / 班级）。 */
+    fun fetchStudentInfo(cookies: String): JwFetchResult<StudentInfo> {
+        if (cookies.isBlank()) {
+            return JwFetchResult.NeedWebLogin("请先登录超星教务以获取个人信息")
+        }
+        return when (val res = getText("/admin/xsd/xsjbxx/getXjxxByXnxq", cookies, isXhr = true)) {
+            HttpFetch.Expired -> JwFetchResult.NeedWebLogin("超星教务登录已过期，请重新登录")
+            is HttpFetch.Error -> JwFetchResult.Error(res.message)
+            is HttpFetch.Ok -> {
+                val info = parseStudentInfoJson(res.body)
+                if (info != null) JwFetchResult.Success(info)
+                else JwFetchResult.Error("学籍信息解析失败")
+            }
+        }
     }
 
     /** 拉取全部学期成绩（主走 desktop xsdQueryXscjList，异常或空结果时回退移动端 getXscjJson）。 */
@@ -357,17 +379,14 @@ class ChaoxingJwClient(
         val xnxq = fetchCurrentXnxq(cookies) ?: "${auto.xnm}-${auto.xnm + 1}-${auto.term}"
         val week = fetchCurrentWeek(cookies, xnxq) ?: 1
 
-        // 注意超星教务服务端拼写为 getRommList
+        // 注意超星教务服务端拼写为 getRommList；roomkblist 页面以 id 传递教学楼 ID
         val roomsRes = postForm(
             "/admin/jwxtgld/kbcx/getRommList",
             cookies,
             mapOf(
-                "xqid" to campusId,
-                "jxlid" to matched.id,
-                "jxlbh" to matched.code,
-                "xnxq" to xnxq,
-                "page" to "1",
-                "rows" to "200",
+                "id" to matched.id,
+                "jsmc" to "",
+                "jslx" to "",
             ),
             isXhr = true,
         )
@@ -376,7 +395,7 @@ class ChaoxingJwClient(
             is HttpFetch.Error -> return JwFetchResult.Error(roomsRes.message)
             is HttpFetch.Ok -> roomsRes.body
         }
-        val rooms = parseBuildingRoomsJson(roomsRaw).take(30)
+        val rooms = parseBuildingRoomsJson(roomsRaw).take(80)
         if (rooms.isEmpty()) {
             return JwFetchResult.Success(emptyList())
         }
@@ -385,7 +404,7 @@ class ChaoxingJwClient(
         val dayLabel = "周${"一二三四五六日"[dayOfWeek.coerceIn(1, 7) - 1]}"
         val freeLabel = "$dayLabel $periodRange 空闲"
 
-        val pool = Executors.newFixedThreadPool(6)
+        val pool = Executors.newFixedThreadPool(8)
         try {
             val tasks = rooms.map { room ->
                 Callable<Pair<RoomRef, HttpFetch>> {
@@ -649,6 +668,147 @@ class ChaoxingJwClient(
             )
         }
 
+        private val KCXZ_LABELS = mapOf(
+            "01" to "公共必修课",
+            "02" to "公共任选课",
+            "03" to "公共限选课",
+            "04" to "语言类基础必修课",
+            "05" to "专业必修课",
+            "06" to "专业基础必修课",
+            "07" to "专业任选课",
+            "08" to "专业限选课",
+            "09" to "实习",
+            "10" to "课程设计",
+            "11" to "毕业论文（设计）",
+            "12" to "军训",
+            "13" to "其他",
+            "14" to "技能训练",
+            "15" to "入学教育",
+            "16" to "毕业教育",
+            "17" to "劳动",
+            "18" to "社会实践",
+            "19" to "专业实践周",
+            "20" to "专业基础任选课",
+            "21" to "专业基础限选课",
+            "22" to "创新创业",
+            "23" to "素质拓展",
+            "99" to "公共选修课",
+        )
+
+        private val KCLX_LABELS = mapOf(
+            "01" to "普通课",
+            "02" to "实验课",
+            "03" to "上机课",
+            "04" to "体育课",
+            "05" to "外语课",
+            "06" to "校企合作",
+            "7" to "理论课",
+            "07" to "理论课",
+            "8" to "理实一体课",
+            "08" to "理实一体课",
+            "9" to "实践课",
+            "09" to "实践课",
+        )
+
+        private val XDXZ_LABELS = mapOf(
+            "1" to "初修",
+            "2" to "重修",
+            "3" to "补考",
+        )
+
+        private fun resolveCourseType(kcxz: String?, kclx: String?, xdxz: String?): String {
+            kcxz?.takeIf { it.isNotBlank() }?.let { return KCXZ_LABELS[it] ?: it }
+            kclx?.takeIf { it.isNotBlank() }?.let { return KCLX_LABELS[it] ?: it }
+            xdxz?.takeIf { it.isNotBlank() }?.let { return XDXZ_LABELS[it] ?: it }
+            return "必修"
+        }
+
+        /** 解析 `/admin/xsd/xsjbxx/getXjxxByXnxq` 返回的学生学籍 JSON。 */
+        fun parseStudentInfoJson(raw: String): StudentInfo? {
+            val trimmed = raw.trim()
+            if (!trimmed.startsWith("{")) return null
+            val root = runCatching { JSONObject(trimmed) }.getOrNull() ?: return null
+            val data = root.optJSONObject("data") ?: root
+            fun cleanField(key: String): String {
+                val v = data.opt(key) ?: return ""
+                if (v == JSONObject.NULL) return ""
+                val s = stripHtml(v.toString())
+                return if (s.equals("null", ignoreCase = true)) "" else s
+            }
+            val info = StudentInfo(
+                name = cleanField("xm"),
+                studentId = cleanField("xh").ifBlank { cleanField("currentUserName") },
+                className = cleanField("bjmc"),
+                department = cleanField("yxmc"),
+                major = cleanField("zymc"),
+                grade = cleanField("sznj").ifBlank { cleanField("rxnj") },
+            )
+            return if (
+                info.name.isBlank() && info.studentId.isBlank() && info.major.isBlank() &&
+                info.department.isBlank() && info.className.isBlank() && info.grade.isBlank()
+            ) null else info
+        }
+
+        private data class RawGradeEntry(val item: GradeItem, val courseKey: String)
+
+        private fun resolveExamNature(sfbk: String, cjbj: String, xdxz: String): String = when {
+            sfbk == "1" || sfbk == "是" || sfbk.equals("true", ignoreCase = true) || sfbk.contains("补考") -> "补考"
+            cjbj.contains("补考") -> "补考"
+            cjbj.contains("重修") -> "重修"
+            cjbj.contains("缓考") -> "缓考"
+            xdxz == "3" -> "补考"
+            xdxz == "2" -> "重修"
+            else -> ""
+        }
+
+        private fun resolveCourseKey(kcbh: String, kcid: String, courseName: String): String {
+            if (kcbh.isNotBlank()) return "bh:$kcbh"
+            if (kcid.isNotBlank()) return "id:$kcid"
+            val bracketCode = Regex("""^\[([^\]]+)]""").find(courseName)?.groupValues?.getOrNull(1)?.trim()
+            if (!bracketCode.isNullOrBlank()) return "bc:$bracketCode"
+            return "nm:${courseName.replace(Regex("""\s+"""), "")}"
+        }
+
+        private fun normalizeRetakeGrades(entries: List<RawGradeEntry>): List<GradeItem> {
+            val out = mutableListOf<GradeItem>()
+            entries.groupBy { it.courseKey }.values.forEach { group ->
+                if (group.size == 1) {
+                    out += group.single().item
+                } else {
+                    val ordered = group.sortedWith(
+                        compareBy<RawGradeEntry> { it.item.termLabel }
+                            .thenBy { if (it.item.passed) 1 else 0 },
+                    )
+                    val resolved = mutableListOf<GradeItem>()
+                    for (entry in ordered) {
+                        val cur = entry.item
+                        val failIdx = resolved.indexOfLast { prev ->
+                            !prev.passed && prev.termLabel <= cur.termLabel
+                        }
+                        val prev = if (failIdx >= 0) resolved[failIdx] else null
+                        val relocateRetake = prev != null && (
+                            cur.examNature == "补考" ||
+                                (cur.examNature.isBlank() && cur.termLabel > prev.termLabel) ||
+                                (cur.termLabel == prev.termLabel && cur.passed && cur.examNature != "重修")
+                            )
+                        if (relocateRetake && prev != null) {
+                            resolved[failIdx] = cur.copy(
+                                termLabel = prev.termLabel,
+                                examNature = "补考",
+                                examTermLabel = if (cur.termLabel != prev.termLabel) cur.termLabel else "",
+                                initialScoreText = prev.scoreText.ifBlank { prev.initialScoreText },
+                                credits = if (cur.credits > 0.0) cur.credits else prev.credits,
+                            )
+                        } else {
+                            resolved += cur
+                        }
+                    }
+                    out += resolved
+                }
+            }
+            return out.sortedWith(compareByDescending<GradeItem> { it.termLabel }.thenBy { it.courseName })
+        }
+
         /** 解析超星教务成绩 JSON（同时兼容 desktop `results[]` 与 mobile `data.xscjList[]`）。 */
         fun parseChaoxingGradesJson(raw: String): List<GradeItem> {
             val trimmed = raw.trim()
@@ -658,14 +818,16 @@ class ChaoxingJwClient(
                 ?: root.optJSONObject("data")?.optJSONArray("xscjList")
                 ?: return emptyList()
 
-            return buildList {
+            fun cleanOpt(obj: JSONObject, key: String): String =
+                obj.optString(key).takeUnless { it.isBlank() || it == "null" }?.trim().orEmpty()
+
+            val entries = buildList {
                 for (i in 0 until array.length()) {
                     val obj = array.optJSONObject(i) ?: continue
                     val name = stripHtml(obj.optString("kcmc")).ifBlank { continue }
-                    val term = obj.optString("xnxq").takeUnless { it == "null" }.orEmpty().trim()
-                    val score = obj.optString("zhcj").takeUnless { it.isBlank() || it == "null" }
-                        ?: obj.optString("bfzzhcj").takeUnless { it == "null" }.orEmpty()
-                    val sfjg = obj.optString("sfjg").takeUnless { it == "null" }.orEmpty().trim()
+                    val term = cleanOpt(obj, "xnxq")
+                    val score = cleanOpt(obj, "zhcj").ifBlank { cleanOpt(obj, "bfzzhcj") }
+                    val sfjg = cleanOpt(obj, "sfjg")
                     val passed = when {
                         sfjg == "0" || sfjg == "否" -> false
                         sfjg == "1" || sfjg == "是" -> true
@@ -674,28 +836,50 @@ class ChaoxingJwClient(
                     }
                     val credits = obj.optDouble("hdxf", Double.NaN).takeIf { !it.isNaN() && it > 0.0 }
                         ?: obj.optDouble("sjxf", 0.0).let { if (it.isNaN()) 0.0 else it }
-                    val gpa = obj.optString("xfjd").trim().toDoubleOrNull()
-                        ?: deriveGpa(score, passed)
-                    val type = obj.optString("kcxz").takeUnless { it.isBlank() || it == "null" }
-                        ?: obj.optString("kclx").takeUnless { it.isBlank() || it == "null" }
-                        ?: obj.optString("xdxz").takeUnless { it.isBlank() || it == "null" }
-                        ?: "必修"
-                    val id = obj.optString("id").takeUnless { it.isBlank() || it == "null" }
-                        ?: "$term|$name|$i"
+                    val directJd = cleanOpt(obj, "jd").toDoubleOrNull()
+                    val xfjd = cleanOpt(obj, "xfjd").toDoubleOrNull()
+                    // 河牧教务 xsdQueryXscjList 返回的 xfjd 为「学分绩点 = 学分 × 单科绩点」，需除以学分还原为单科绩点
+                    val gpa = when {
+                        !passed -> 0.0
+                        directJd != null && directJd > 0.0 -> directJd
+                        xfjd != null && xfjd > 0.0 -> {
+                            if (credits > 0.0) kotlin.math.round((xfjd / credits) * 100.0) / 100.0
+                            else xfjd
+                        }
+                        else -> deriveGpa(score, passed)
+                    }
+                    val kcxz = cleanOpt(obj, "kcxz")
+                    val kclx = cleanOpt(obj, "kclx")
+                    val xdxz = cleanOpt(obj, "xdxz")
+                    val sfbk = cleanOpt(obj, "sfbk")
+                    val cjbj = stripHtml(cleanOpt(obj, "cjbj"))
+                    val type = resolveCourseType(
+                        kcxz.takeIf { it.isNotBlank() },
+                        kclx.takeIf { it.isNotBlank() },
+                        xdxz.takeIf { it.isNotBlank() },
+                    )
+                    val examNature = resolveExamNature(sfbk, cjbj, xdxz)
+                    val courseKey = resolveCourseKey(cleanOpt(obj, "kcbh"), cleanOpt(obj, "kcid"), name)
+                    val id = cleanOpt(obj, "id").ifBlank { "$term|$name|$i" }
                     add(
-                        GradeItem(
-                            id = id,
-                            termLabel = term,
-                            courseName = name,
-                            courseType = type,
-                            credits = credits,
-                            scoreText = score.trim(),
-                            gpa = gpa,
-                            passed = passed,
+                        RawGradeEntry(
+                            item = GradeItem(
+                                id = id,
+                                termLabel = term,
+                                courseName = name,
+                                courseType = type,
+                                credits = credits,
+                                scoreText = score,
+                                gpa = gpa,
+                                passed = passed,
+                                examNature = examNature,
+                            ),
+                            courseKey = courseKey,
                         ),
                     )
                 }
-            }.sortedWith(compareByDescending<GradeItem> { it.termLabel }.thenBy { it.courseName })
+            }
+            return normalizeRetakeGrades(entries)
         }
 
         private fun deriveGpa(scoreText: String, passed: Boolean): Double {
@@ -820,10 +1004,10 @@ class ChaoxingJwClient(
          */
         fun diffNewGrades(previous: List<GradeItem>, incoming: List<GradeItem>): List<GradeItem> {
             if (previous.isEmpty()) return incoming.map { it.copy(isNew = false) }
-            val oldMap = previous.associateBy { "${it.termLabel}|${it.courseName}" }
+            val oldMap = previous.associateBy { "${it.termLabel}|${it.courseName}|${it.examNature}" }
             return incoming.map { item ->
-                val prev = oldMap["${item.termLabel}|${item.courseName}"]
-                val changed = prev == null || prev.scoreText != item.scoreText
+                val prev = oldMap["${item.termLabel}|${item.courseName}|${item.examNature}"]
+                val changed = prev == null || prev.scoreText != item.scoreText || prev.examNature != item.examNature
                 item.copy(isNew = changed)
             }
         }

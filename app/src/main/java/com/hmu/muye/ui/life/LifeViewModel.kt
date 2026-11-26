@@ -41,6 +41,8 @@ data class LifeUiState(
     val yixiaoyuanMobile: String = "",
     val yixiaoyuanBusy: Boolean = false,
     val waterCodeInfo: WaterCode? = null,
+    val showerFeedback: String? = null,
+    val showerFeedbackError: Boolean = false,
     val pendingParcels: List<ParcelItem> = emptyList(),
     val archivedParcelCount: Int = 0,
     val customParcelRules: List<CustomParcelRule> = emptyList(),
@@ -67,9 +69,13 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     private val campusLife = container.campusLife
     private val parcels = container.parcels
     private val portalClient = container.portalClient
-    private val ujingClient = UjingClient()
+    private val ujingClient = UjingClient(
+        log = { msg -> android.util.Log.d("UjingApi", msg) },
+    )
     private val yixiaoyuanClient = YixiaoyuanClient()
-    private val waterClient = YixiaoyuanWaterClient()
+    private val waterClient = YixiaoyuanWaterClient(
+        log = { msg -> android.util.Log.d("YxyWater", msg) },
+    )
 
     private val _state = MutableStateFlow(
         campusLife.yixiaoyuanCredential().let { cred ->
@@ -213,18 +219,37 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setShowYixiaoyuanBalance(show: Boolean) {
-        val next = _state.value.yixiaoyuan.copy(showBalanceCard = show)
+        val next = campusLife.yixiaoyuan().copy(showBalanceCard = show)
         campusLife.saveYixiaoyuan(next)
-        _state.update { it.copy(yixiaoyuan = next) }
+        _state.update { cur ->
+            val clearBalanceMsg = !show && cur.statusMessage?.contains("余额") == true
+            cur.copy(
+                yixiaoyuan = next,
+                statusMessage = if (clearBalanceMsg) null else cur.statusMessage,
+                statusError = if (clearBalanceMsg) false else cur.statusError,
+            )
+        }
     }
 
     fun logoutYixiaoyuan() {
         campusLife.saveYixiaoyuanCredential(YixiaoyuanCredential())
+        val cleared = campusLife.yixiaoyuan().copy(
+            hasCredential = false,
+            ymId = "",
+            cardBalanceYuan = null,
+            showerCode = "",
+            showerCodeAt = 0L,
+        )
+        campusLife.saveYixiaoyuan(cleared, shiroJid = "")
         _state.update {
             it.copy(
+                yixiaoyuan = cleared,
                 yixiaoyuanSignedIn = false,
                 yixiaoyuanMobile = "",
-                statusMessage = "已退出易校园账号（shiroJID 会话不受影响）",
+                waterCodeInfo = null,
+                showerFeedback = null,
+                showerFeedbackError = false,
+                statusMessage = "已退出易校园账号",
                 statusError = false,
             )
         }
@@ -233,45 +258,213 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     fun saveShiroJidAndRefresh(shiroJid: String) {
         val clean = shiroJid.trim()
         if (clean.isNotBlank()) {
-            campusLife.saveYixiaoyuan(_state.value.yixiaoyuan, clean)
+            campusLife.saveYixiaoyuan(campusLife.yixiaoyuan(), clean)
         }
-        refreshShowerCode()
+        refreshShowerCode(forceGenerate = false)
     }
 
-    /** 拉取浴室动态用水码（8 位）；仅需 shiroJID，不依赖 token/uuToken。 */
-    fun refreshShowerCode() {
+    /**
+     * 拉取或刷新浴室 8 位动态用水码。
+     *
+     * 若尚未配置 `shiroJID` 或服务端返回 204 过期，会自动用已登录账号的 `ymId` 无感换票并重试。
+     * [forceGenerate] 为 true 时主动调用 `insertRanCode` 申请新码。
+     */
+    fun refreshShowerCode(forceGenerate: Boolean = false) {
         if (_state.value.yixiaoyuanBusy) return
-        val jid = campusLife.yixiaoyuanShiroJid()
-        if (jid.isBlank()) {
-            _state.update { it.copy(statusMessage = "请先在易校园配置中填入会话 shiroJID", statusError = true) }
+        val cred = campusLife.yixiaoyuanCredential()
+        val initialJid = campusLife.yixiaoyuanShiroJid()
+        if (initialJid.isBlank() && !cred.signedIn) {
+            _state.update {
+                it.copy(
+                    statusMessage = "请先登录易校园账号以获取洗澡用水码",
+                    statusError = true,
+                    showerFeedback = "请先登录易校园账号",
+                    showerFeedbackError = true,
+                )
+            }
             return
         }
-        _state.update { it.copy(yixiaoyuanBusy = true, statusMessage = null, statusError = false) }
+        val previousCode = campusLife.yixiaoyuan().showerCode
+        _state.update {
+            it.copy(
+                yixiaoyuanBusy = true,
+                statusMessage = null,
+                statusError = false,
+                showerFeedback = null,
+                showerFeedbackError = false,
+            )
+        }
         viewModelScope.launch {
-            when (val r = withContext(Dispatchers.IO) { waterClient.queryCode(jid) }) {
-                is YixiaoyuanResult.Success -> applyWaterCode(r.data)
+            val res = withContext(Dispatchers.IO) {
+                fetchOrRenewWaterCode(cred, initialJid, forceGenerate)
+            }
+            when (res) {
+                is YixiaoyuanResult.Success -> applyWaterCode(res.data, previousCode, forceGenerate)
                 is YixiaoyuanResult.SessionExpired ->
                     _state.update {
                         it.copy(
                             yixiaoyuanBusy = false,
-                            statusMessage = "易校园会话已过期，请重新登录官方 App 后更新 shiroJID",
+                            statusMessage = "易校园会话已过期，请重新登录易校园账号",
                             statusError = true,
+                            showerFeedback = "会话已过期，点此重登",
+                            showerFeedbackError = true,
                         )
                     }
                 is YixiaoyuanResult.Error ->
-                    _state.update { it.copy(yixiaoyuanBusy = false, statusMessage = r.message, statusError = true) }
+                    _state.update {
+                        it.copy(
+                            yixiaoyuanBusy = false,
+                            statusMessage = res.message,
+                            statusError = true,
+                            showerFeedback = res.message,
+                            showerFeedbackError = true,
+                        )
+                    }
             }
         }
     }
 
-    private fun applyWaterCode(code: WaterCode) {
-        val next = _state.value.yixiaoyuan.copy(
+    /** 停用当前正在生效的 8 位浴室用水码（`/app/hzsun/cloudwater/cancelRanCode`）。 */
+    fun cancelShowerCode() {
+        if (_state.value.yixiaoyuanBusy) return
+        val currentCode = campusLife.yixiaoyuan().showerCode.trim()
+        if (currentCode.isBlank()) {
+            _state.update {
+                it.copy(
+                    showerFeedback = "当前没有启用中的用水码",
+                    showerFeedbackError = false,
+                )
+            }
+            return
+        }
+        val cred = campusLife.yixiaoyuanCredential()
+        val initialJid = campusLife.yixiaoyuanShiroJid()
+        if (initialJid.isBlank() && !cred.signedIn) {
+            _state.update {
+                it.copy(
+                    statusMessage = "请先登录易校园账号后再停用用水码",
+                    statusError = true,
+                    showerFeedback = "请先登录易校园账号",
+                    showerFeedbackError = true,
+                )
+            }
+            return
+        }
+        _state.update {
+            it.copy(
+                yixiaoyuanBusy = true,
+                statusMessage = null,
+                statusError = false,
+                showerFeedback = null,
+                showerFeedbackError = false,
+            )
+        }
+        viewModelScope.launch {
+            val res = withContext(Dispatchers.IO) {
+                withValidShiroJid(cred, initialJid) { jid ->
+                    waterClient.cancelCode(jid, currentCode)
+                }
+            }
+            when (res) {
+                is YixiaoyuanResult.Success -> {
+                    val cleared = campusLife.yixiaoyuan().copy(showerCode = "", showerCodeAt = 0L)
+                    campusLife.saveYixiaoyuan(cleared)
+                    _state.update {
+                        it.copy(
+                            yixiaoyuan = cleared,
+                            waterCodeInfo = null,
+                            yixiaoyuanBusy = false,
+                            statusMessage = "已停用当前洗澡用水码",
+                            statusError = false,
+                            showerFeedback = "已停用，需要时可重新获取",
+                            showerFeedbackError = false,
+                        )
+                    }
+                }
+                is YixiaoyuanResult.SessionExpired ->
+                    _state.update {
+                        it.copy(
+                            yixiaoyuanBusy = false,
+                            statusMessage = "易校园会话已过期，请重新登录易校园账号",
+                            statusError = true,
+                            showerFeedback = "会话已过期，点此重登",
+                            showerFeedbackError = true,
+                        )
+                    }
+                is YixiaoyuanResult.Error ->
+                    _state.update {
+                        it.copy(
+                            yixiaoyuanBusy = false,
+                            statusMessage = res.message,
+                            statusError = true,
+                            showerFeedback = res.message,
+                            showerFeedbackError = true,
+                        )
+                    }
+            }
+        }
+    }
+
+    private fun <T> withValidShiroJid(
+        cred: YixiaoyuanCredential,
+        initialJid: String,
+        block: (String) -> YixiaoyuanResult<T>,
+    ): YixiaoyuanResult<T> {
+        var jid = initialJid
+        if (jid.isBlank()) {
+            if (!cred.signedIn) return YixiaoyuanResult.Error("请先登录易校园账号")
+            when (val exchanged = waterClient.exchangeShiroJid(cred)) {
+                is YixiaoyuanResult.Success -> {
+                    jid = exchanged.data
+                    campusLife.saveYixiaoyuan(campusLife.yixiaoyuan(), jid)
+                }
+                is YixiaoyuanResult.SessionExpired -> return exchanged
+                is YixiaoyuanResult.Error -> return exchanged
+            }
+        }
+
+        val firstTry = block(jid)
+        if (firstTry !is YixiaoyuanResult.SessionExpired || !cred.signedIn) {
+            return firstTry
+        }
+
+        return when (val renewed = waterClient.exchangeShiroJid(cred)) {
+            is YixiaoyuanResult.Success -> {
+                val freshJid = renewed.data
+                campusLife.saveYixiaoyuan(campusLife.yixiaoyuan(), freshJid)
+                block(freshJid)
+            }
+            is YixiaoyuanResult.SessionExpired -> renewed
+            is YixiaoyuanResult.Error -> renewed
+        }
+    }
+
+    private fun fetchOrRenewWaterCode(
+        cred: YixiaoyuanCredential,
+        initialJid: String,
+        forceGenerate: Boolean,
+    ): YixiaoyuanResult<WaterCode> = withValidShiroJid(cred, initialJid) { jid ->
+        if (forceGenerate) waterClient.insertCode(jid)
+        else waterClient.queryCode(jid, autoGenerateIfEmpty = true)
+    }
+
+    private fun applyWaterCode(
+        code: WaterCode,
+        previousCode: String = "",
+        forceGenerate: Boolean = false,
+    ) {
+        val next = campusLife.yixiaoyuan().copy(
             showerCode = code.code,
             showerCodeAt = code.fetchedAt,
         )
         campusLife.saveYixiaoyuan(next)
-        val tip = if (code.longTerm) "用水码已更新（长期有效）"
-        else "用水码已更新（剩余 ${code.validSeconds / 60} 分钟）"
+        val validity = code.validityText()
+        val suffix = if (validity.isNotBlank()) "（$validity）" else ""
+        val tip = when {
+            forceGenerate && previousCode.isNotBlank() && previousCode != code.code -> "已换新码$suffix"
+            forceGenerate && previousCode.isNotBlank() && previousCode == code.code -> "当前码仍有效$suffix"
+            else -> "用水码已更新$suffix"
+        }
         _state.update {
             it.copy(
                 yixiaoyuan = next,
@@ -279,11 +472,13 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
                 yixiaoyuanBusy = false,
                 statusMessage = tip,
                 statusError = false,
+                showerFeedback = tip,
+                showerFeedbackError = false,
             )
         }
     }
 
-    /** 账号密码直连登录易校园，无需跳转官方 App，成功后直接拉取一卡通余额。 */
+    /** 账号密码直连登录易校园，无需跳转官方 App，成功后自动换取用水码（并按开关决定是否查余额）。 */
     fun loginYixiaoyuanByPassword(mobile: String, password: String) {
         if (_state.value.yixiaoyuanBusy) return
         if (mobile.isBlank() || password.isBlank()) {
@@ -301,10 +496,9 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 短信验证码登录易校园，换取 token / uuToken。
+     * 短信验证码登录易校园，换取 token / uuToken 后自动同步用水码。
      *
-     * 验证码需在官方 App「获取验证码」后填入（发送接口需要官方 native 生成的安全令牌，
-     * 本项目未实现），提交这一步服务端不校验签名；推荐优先使用 [loginYixiaoyuanByPassword]。
+     * 验证码需在官方 App「获取验证码」后填入；推荐优先使用 [loginYixiaoyuanByPassword]。
      */
     fun loginYixiaoyuan(mobile: String, verificationCode: String) {
         if (_state.value.yixiaoyuanBusy) return
@@ -322,23 +516,92 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun handleYixiaoyuanLoginResult(r: YixiaoyuanResult<YixiaoyuanCredential>) {
+    private suspend fun handleYixiaoyuanLoginResult(r: YixiaoyuanResult<YixiaoyuanCredential>) {
         when (r) {
             is YixiaoyuanResult.Success -> {
-                campusLife.saveYixiaoyuanCredential(r.data)
-                val next = _state.value.yixiaoyuan.copy(ymId = r.data.ymId)
-                campusLife.saveYixiaoyuan(next)
+                val cred = r.data
+                campusLife.saveYixiaoyuanCredential(cred)
+                val initialState = campusLife.yixiaoyuan().copy(ymId = cred.ymId)
+                campusLife.saveYixiaoyuan(initialState)
+                val showBalance = initialState.showBalanceCard
                 _state.update {
                     it.copy(
-                        yixiaoyuan = next,
-                        yixiaoyuanSignedIn = r.data.signedIn,
-                        yixiaoyuanMobile = r.data.mobile,
-                        yixiaoyuanBusy = false,
-                        statusMessage = "易校园登录成功，正在获取余额…",
+                        yixiaoyuan = initialState,
+                        yixiaoyuanSignedIn = cred.signedIn,
+                        yixiaoyuanMobile = cred.mobile,
+                        yixiaoyuanBusy = true,
+                        statusMessage = if (showBalance) {
+                            "易校园登录成功，正在同步用水码与余额…"
+                        } else {
+                            "易校园登录成功，正在同步 8 位洗澡用水码…"
+                        },
                         statusError = false,
                     )
                 }
-                refreshCardBalance()
+
+                val (waterRes, balanceRes) = withContext(Dispatchers.IO) {
+                    val wRes = fetchOrRenewWaterCode(
+                        cred = cred,
+                        initialJid = "",
+                        forceGenerate = false,
+                    )
+                    if (wRes is YixiaoyuanResult.Success) {
+                        val updated = campusLife.yixiaoyuan().copy(
+                            showerCode = wRes.data.code,
+                            showerCodeAt = wRes.data.fetchedAt,
+                        )
+                        campusLife.saveYixiaoyuan(updated)
+                    }
+                    val bRes = if (campusLife.yixiaoyuan().showBalanceCard) {
+                        yixiaoyuanClient.getCardMoney(cred).also { moneyRes ->
+                            if (moneyRes is YixiaoyuanResult.Success) {
+                                val updated = campusLife.yixiaoyuan().copy(cardBalanceYuan = moneyRes.data)
+                                campusLife.saveYixiaoyuan(updated)
+                            }
+                        }
+                    } else {
+                        null
+                    }
+                    wRes to bRes
+                }
+
+                val finalYxy = campusLife.yixiaoyuan()
+                val waterErr = (waterRes as? YixiaoyuanResult.Error)?.message
+                    ?: (waterRes as? YixiaoyuanResult.SessionExpired)?.message
+                val waterOk = waterRes is YixiaoyuanResult.Success
+                val balanceVal = (balanceRes as? YixiaoyuanResult.Success)?.data
+                val (finalMsg, finalErr) = if (!finalYxy.showBalanceCard) {
+                    if (waterOk) {
+                        "已登录易校园，8 位洗澡用水码已就绪" to false
+                    } else {
+                        "已登录易校园，自动获取用水码失败：${waterErr ?: "请稍后重试"}" to true
+                    }
+                } else {
+                    when {
+                        waterOk && balanceVal != null -> {
+                            val text = if (finalYxy.isLowBalance) {
+                                "已登录易校园，用水码已就绪；余额 ¥%.2f，已低于提醒阈值".format(balanceVal)
+                            } else {
+                                "已登录易校园，用水码已就绪 · 余额 ¥%.2f".format(balanceVal)
+                            }
+                            text to false
+                        }
+                        waterOk -> "已登录易校园，用水码已就绪；余额获取失败（不影响用水码）" to false
+                        balanceVal != null ->
+                            "已登录易校园（余额 ¥%.2f），自动获取用水码失败：${waterErr ?: "请稍后重试"}".format(balanceVal) to true
+                        else -> "已登录易校园，同步失败：${waterErr ?: "请稍后重试"}" to true
+                    }
+                }
+
+                _state.update {
+                    it.copy(
+                        yixiaoyuan = finalYxy,
+                        waterCodeInfo = (waterRes as? YixiaoyuanResult.Success)?.data ?: it.waterCodeInfo,
+                        yixiaoyuanBusy = false,
+                        statusMessage = finalMsg,
+                        statusError = finalErr,
+                    )
+                }
             }
             is YixiaoyuanResult.SessionExpired ->
                 _state.update { it.copy(yixiaoyuanBusy = false, statusMessage = r.message, statusError = true) }
@@ -347,9 +610,10 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 刷新一卡通余额（需已登录拿到 token + uuToken）。 */
+    /** 刷新一卡通余额（仅在用户开启生活页余额展示时触发并提示）。 */
     fun refreshCardBalance() {
         if (_state.value.yixiaoyuanBusy) return
+        if (!campusLife.yixiaoyuan().showBalanceCard) return
         val credential = campusLife.yixiaoyuanCredential()
         if (!credential.signedIn) {
             _state.update { it.copy(statusMessage = "请先登录易校园账号", statusError = true) }
@@ -359,14 +623,21 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             when (val r = withContext(Dispatchers.IO) { yixiaoyuanClient.getCardMoney(credential) }) {
                 is YixiaoyuanResult.Success -> {
-                    val next = _state.value.yixiaoyuan.copy(cardBalanceYuan = r.data)
+                    val cur = campusLife.yixiaoyuan()
+                    val next = cur.copy(cardBalanceYuan = r.data)
                     campusLife.saveYixiaoyuan(next)
                     val low = next.isLowBalance
+                    val msg = if (cur.showBalanceCard) {
+                        if (low) "余额 ¥%.2f，已低于提醒阈值".format(r.data)
+                        else "余额已更新：¥%.2f".format(r.data)
+                    } else {
+                        null
+                    }
                     _state.update {
                         it.copy(
                             yixiaoyuan = next,
                             yixiaoyuanBusy = false,
-                            statusMessage = if (low) "余额 ¥%.2f，已低于提醒阈值".format(r.data) else "余额已更新：¥%.2f".format(r.data),
+                            statusMessage = msg,
                             statusError = false,
                         )
                     }
@@ -375,7 +646,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update {
                         it.copy(
                             yixiaoyuanBusy = false,
-                            statusMessage = "易校园登录已失效，请重新用验证码登录",
+                            statusMessage = "易校园登录已失效，请重新登录易校园账号",
                             statusError = true,
                         )
                     }

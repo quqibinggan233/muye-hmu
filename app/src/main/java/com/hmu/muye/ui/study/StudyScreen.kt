@@ -25,9 +25,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.MenuBook
-import androidx.compose.material.icons.outlined.Notifications
-import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.School
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,8 +57,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fengkao.timetable.data.model.CourseBlock
-import com.fengkao.timetable.data.xuexitong.NoticeFormat
-import com.fengkao.timetable.data.xuexitong.TaskItem
 import com.fengkao.timetable.ui.MainViewModel
 import com.fengkao.timetable.ui.theme.BrandGreen
 import com.fengkao.timetable.ui.theme.BrandGreenSoft
@@ -74,11 +69,13 @@ import com.fengkao.timetable.ui.theme.IsDark
 import com.fengkao.timetable.ui.theme.SheetColor
 import com.fengkao.timetable.ui.theme.appBackground
 import com.fengkao.timetable.ui.water.ServiceMessage
-import com.fengkao.timetable.ui.xuexitong.NoticeCenterSheet
+import com.fengkao.timetable.ui.xuexitong.NoticeBlue
+import com.fengkao.timetable.ui.xuexitong.NoticeBlueSoft
+import com.fengkao.timetable.ui.xuexitong.NoticeCenterPanel
 import com.fengkao.timetable.ui.xuexitong.XuexitongLauncher
 import com.fengkao.timetable.ui.xuexitong.XuexitongLogin
-import com.fengkao.timetable.ui.xuexitong.XuexitongUiState
 import com.fengkao.timetable.ui.xuexitong.XuexitongViewModel
+import com.fengkao.timetable.ui.xuexitong.XuexitongWebDialog
 import com.hmu.muye.data.jw.ChaoxingDirectLoginDialog
 import com.hmu.muye.data.jw.ExamNote
 import com.hmu.muye.data.jw.GradeItem
@@ -100,9 +97,8 @@ fun StudyScreen(
     val context = LocalContext.current
 
     var showJwLogin by rememberSaveable { mutableStateOf(false) }
-    var showNoticeCenter by rememberSaveable { mutableStateOf(false) }
     var showXuexitongLogin by rememberSaveable { mutableStateOf(false) }
-    var selectedTask by remember { mutableStateOf<TaskItem?>(null) }
+    var webTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     LaunchedEffect(Unit) {
         studyModel.refreshSessionState()
@@ -127,98 +123,136 @@ fun StudyScreen(
         Modifier
             .fillMaxSize()
             .background(appBackground())
-            .statusBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp)
-            .padding(top = 10.dp, bottom = 120.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+            .statusBarsPadding(),
     ) {
-        // 顶部标题与校区标识
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("河南牧业经济学院 · 超星教务与学习通", fontSize = 11.sp, color = InkGray)
-                Text("学习", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = InkDark)
-            }
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (state.jwConnected) BrandGreenSoft else CardWhite)
-                    .border(1.dp, Hairline, RoundedCornerShape(20.dp))
-                    .clickable { showJwLogin = true }
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-            ) {
-                Text(
-                    if (state.jwConnected) "教务已连接" else "登录超星教务",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (state.jwConnected) BrandGreen else InkMid,
-                )
-            }
-        }
-
-        // 子标签栏
-        Row(
+        // 顶部标题与子标签固定在顶部，避免与下方 LazyColumn 产生嵌套滚动冲突
+        Column(
             Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = 16.dp)
+                .padding(top = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            StudySubTab.entries.forEach { tab ->
-                val active = state.subTab == tab
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("河南牧业经济学院 · 超星教务与学习通", fontSize = 11.sp, color = InkGray)
+                    Text("学习", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = InkDark)
+                }
                 Box(
                     Modifier
                         .clip(RoundedCornerShape(20.dp))
-                        .background(if (active) BrandGreen else CardWhite)
-                        .border(1.dp, if (active) Color.Transparent else Hairline, RoundedCornerShape(20.dp))
-                        .clickable { studyModel.selectSubTab(tab) }
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                        .background(if (state.jwConnected) BrandGreenSoft else CardWhite)
+                        .border(1.dp, Hairline, RoundedCornerShape(20.dp))
+                        .clickable { showJwLogin = true }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
                 ) {
                     Text(
-                        tab.label,
-                        fontSize = 13.sp,
+                        if (state.jwConnected) "教务已连接" else "登录超星教务",
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (active) Color.White else InkMid,
+                        color = if (state.jwConnected) BrandGreen else InkMid,
                     )
                 }
             }
+
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StudySubTab.entries.forEach { tab ->
+                    val active = state.subTab == tab
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (active) BrandGreen else CardWhite)
+                            .border(1.dp, if (active) Color.Transparent else Hairline, RoundedCornerShape(20.dp))
+                            .clickable { studyModel.selectSubTab(tab) }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            tab.label,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (active) Color.White else InkMid,
+                        )
+                    }
+                }
+            }
+
+            ServiceMessage(state.statusMessage, state.statusIsError)
         }
 
-        ServiceMessage(state.statusMessage, state.statusIsError)
+        Spacer(Modifier.height(10.dp))
 
-        when (state.subTab) {
-            StudySubTab.XUEXITONG -> XuexitongStudySection(
-                xuexitong = xuexitong,
+        if (state.subTab == StudySubTab.XUEXITONG) {
+            NoticeCenterPanel(
+                notices = xuexitong.notices,
+                locallyReadIds = xuexitong.locallyReadIds,
+                archivedIds = xuexitong.archivedIds,
+                doneTaskKeys = xuexitong.doneTaskKeys,
+                unreadCount = xuexitong.unreadCount,
+                lastFetchAt = xuexitong.lastFetchAt,
+                loggedIn = xuexitong.loggedIn,
+                sessionExpired = xuexitong.sessionExpired,
+                busy = xuexitong.busy,
+                courses = courses,
+                now = System.currentTimeMillis(),
+                embedded = true,
+                contentBottomPadding = 124.dp,
+                modifier = Modifier.fillMaxWidth().weight(1f),
                 onRefresh = { xuexitongModel.refresh() },
-                onOpenCenter = { showNoticeCenter = true },
+                onMarkAllRead = { xuexitongModel.markAllRead() },
+                onMarkRead = xuexitongModel::markRead,
+                onArchive = xuexitongModel::archive,
+                onUnarchive = xuexitongModel::unarchive,
+                onArchiveRead = { xuexitongModel.archiveRead() },
+                onTaskDone = { key, done -> xuexitongModel.setTaskDone(key, done) },
                 onConnect = { showXuexitongLogin = true },
-                onSelectTask = { selectedTask = it },
-                onToggleDone = { k, d -> xuexitongModel.setTaskDone(k, d) },
+                onOpenChaoxing = { target -> XuexitongLauncher.open(context, target) },
+                onOpenUrl = { pageTitle, targetUrl -> webTarget = pageTitle to targetUrl },
+                onApplyChange = { mainModel.setTab(0) },
             )
-            StudySubTab.GRADES -> GradesSection(
-                state = state,
-                onOpenLogin = { showJwLogin = true },
-                onRefresh = studyModel::refreshGrades,
-                onSelectTerm = studyModel::selectGradeTerm,
-            )
-            StudySubTab.EXAMS -> ExamsSection(
-                state = state,
-                onRefresh = studyModel::refreshExams,
-                onAddNote = studyModel::addExamNote,
-                onDeleteNote = studyModel::removeExamNote,
-            )
-            StudySubTab.EMPTY_ROOMS -> EmptyRoomsSection(
-                state = state,
-                onBuildingChange = studyModel::updateBuildingQuery,
-                onPeriodChange = studyModel::updatePeriodQuery,
-                onDayChange = studyModel::updateDayOfWeek,
-                onQuery = studyModel::queryEmptyRooms,
-            )
-            StudySubTab.LIBRARY -> LibrarySection(
-                savedUrl = state.libraryUrl,
-                onSaveUrl = studyModel::saveLibraryUrl,
-                onOpenWeChat = { IdentityCodeShortcuts.openWeChat(context) },
-                onOpenUrl = { IdentityCodeShortcuts.openUrl(context, it) },
-            )
+        } else {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 124.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                when (state.subTab) {
+                    StudySubTab.GRADES -> GradesSection(
+                        state = state,
+                        onOpenLogin = { showJwLogin = true },
+                        onRefresh = studyModel::refreshGrades,
+                        onSelectTerm = studyModel::selectGradeTerm,
+                    )
+                    StudySubTab.EXAMS -> ExamsSection(
+                        state = state,
+                        onRefresh = studyModel::refreshExams,
+                        onAddNote = studyModel::addExamNote,
+                        onDeleteNote = studyModel::removeExamNote,
+                    )
+                    StudySubTab.EMPTY_ROOMS -> EmptyRoomsSection(
+                        state = state,
+                        onBuildingChange = studyModel::updateBuildingQuery,
+                        onPeriodChange = studyModel::updatePeriodQuery,
+                        onDayChange = studyModel::updateDayOfWeek,
+                        onQuery = studyModel::queryEmptyRooms,
+                    )
+                    StudySubTab.LIBRARY -> LibrarySection(
+                        savedUrl = state.libraryUrl,
+                        onSaveUrl = studyModel::saveLibraryUrl,
+                        onOpenWeChat = { IdentityCodeShortcuts.openWeChat(context) },
+                        onOpenUrl = { IdentityCodeShortcuts.openUrl(context, it) },
+                    )
+                    StudySubTab.XUEXITONG -> Unit
+                }
+            }
         }
     }
 
@@ -231,39 +265,6 @@ fun StudyScreen(
                 showJwLogin = false
                 studyModel.onDirectLoginSuccess(user, pwd, cookies)
                 mainModel.onChaoxingDirectLoginSuccess(user, pwd, cookies)
-            },
-        )
-    }
-
-    if (showNoticeCenter) {
-        NoticeCenterSheet(
-            notices = xuexitong.notices,
-            locallyReadIds = xuexitong.locallyReadIds,
-            archivedIds = xuexitong.archivedIds,
-            doneTaskKeys = xuexitong.doneTaskKeys,
-            unreadCount = xuexitong.unreadCount,
-            lastFetchAt = xuexitong.lastFetchAt,
-            loggedIn = xuexitong.loggedIn,
-            sessionExpired = xuexitong.sessionExpired,
-            busy = xuexitong.busy,
-            courses = courses,
-            now = System.currentTimeMillis(),
-            onDismiss = { showNoticeCenter = false },
-            onRefresh = { xuexitongModel.refresh() },
-            onMarkAllRead = { xuexitongModel.markAllRead() },
-            onMarkRead = xuexitongModel::markRead,
-            onArchive = xuexitongModel::archive,
-            onUnarchive = xuexitongModel::unarchive,
-            onArchiveRead = { xuexitongModel.archiveRead() },
-            onTaskDone = { key, done -> xuexitongModel.setTaskDone(key, done) },
-            onConnect = {
-                showNoticeCenter = false
-                showXuexitongLogin = true
-            },
-            onOpenChaoxing = { XuexitongLauncher.open(context) },
-            onApplyChange = {
-                showNoticeCenter = false
-                mainModel.setTab(0)
             },
         )
     }
@@ -286,147 +287,16 @@ fun StudyScreen(
         }
     }
 
-    selectedTask?.let { task ->
-        AlertDialog(
-            onDismissRequest = { selectedTask = null },
-            containerColor = CardWhite,
-            title = { Text(task.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = InkDark) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("课程：${task.courseName.ifBlank { "课程通知" }}", fontSize = 13.sp, color = BrandGreen, fontWeight = FontWeight.SemiBold)
-                    if (task.latest.deadline != null) {
-                        Text("截止：${task.latest.deadline}", fontSize = 12.sp, color = InkMid)
-                    }
-                    if (task.reminderCount > 1) {
-                        Text("共提醒 ${task.reminderCount} 次", fontSize = 12.sp, color = InkGray)
-                    }
-                    HorizontalDivider(color = Hairline)
-                    Text(
-                        task.latest.content.ifBlank { task.latest.title },
-                        fontSize = 13.sp,
-                        lineHeight = 20.sp,
-                        color = InkDark,
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val done = task.key in xuexitong.doneTaskKeys
-                    xuexitongModel.setTaskDone(task.key, !done)
-                    selectedTask = null
-                }) {
-                    Text(if (task.key in xuexitong.doneTaskKeys) "标为未完成" else "标为已完成")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    XuexitongLauncher.open(context)
-                    selectedTask = null
-                }) {
-                    Text("去学习通")
-                }
+    webTarget?.let { (pageTitle, targetUrl) ->
+        XuexitongWebDialog(
+            title = pageTitle,
+            url = targetUrl,
+            cookies = xuexitongModel.webViewCookies(),
+            onDismiss = { webTarget = null },
+            onOpenInApp = { currentTitle, currentUrl ->
+                XuexitongLauncher.open(context, targetUrl = currentUrl, title = currentTitle)
             },
         )
-    }
-}
-
-@Composable
-private fun XuexitongStudySection(
-    xuexitong: XuexitongUiState,
-    onRefresh: () -> Unit,
-    onOpenCenter: () -> Unit,
-    onConnect: () -> Unit,
-    onSelectTask: (TaskItem) -> Unit,
-    onToggleDone: (String, Boolean) -> Unit,
-) {
-    StudyCard {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Outlined.Notifications, null, tint = BrandGreen, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    if (xuexitong.loggedIn && !xuexitong.sessionExpired) "学习通通知与作业中心" else "连接学习通账户",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = InkDark,
-                )
-                Text(
-                    if (xuexitong.loggedIn) {
-                        "未读 ${xuexitong.unreadCount} · 待办 ${xuexitong.tasks.size} · 调停课 ${xuexitong.changes.size} · ${NoticeFormat.fetchAge(xuexitong.lastFetchAt)}"
-                    } else {
-                        "登录后自动归并作业、考试、签到与课程公告"
-                    },
-                    fontSize = 12.sp,
-                    color = InkGray,
-                )
-            }
-            if (xuexitong.loggedIn && !xuexitong.sessionExpired) {
-                IconButton(onClick = onRefresh, enabled = !xuexitong.busy) {
-                    Icon(Icons.Outlined.Refresh, "刷新", tint = BrandGreen)
-                }
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (xuexitong.loggedIn && !xuexitong.sessionExpired) {
-                Button(
-                    onClick = onOpenCenter,
-                    colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("打开完整通知中心", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                }
-            } else {
-                Button(
-                    onClick = onConnect,
-                    colors = ButtonDefaults.buttonColors(containerColor = BrandGreen, contentColor = Color.White),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text(if (xuexitong.sessionExpired) "重新登录学习通" else "立即登录学习通", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
-    }
-
-    if (xuexitong.tasks.isNotEmpty()) {
-        StudyCard {
-            Text("近期作业与测验（点击查看详情）", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = InkDark)
-            Spacer(Modifier.height(8.dp))
-            xuexitong.tasks.take(12).forEachIndexed { idx, task ->
-                val done = task.key in xuexitong.doneTaskKeys
-                if (idx > 0) HorizontalDivider(color = Hairline)
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onSelectTask(task) }
-                        .padding(vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            task.title,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = if (done) InkGray else InkDark,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            listOf(task.courseName, task.latest.deadline ?: "点击看正文").filter { it.isNotBlank() }.joinToString(" · "),
-                            fontSize = 11.sp,
-                            color = InkGray,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    TextButton(onClick = { onToggleDone(task.key, !done) }) {
-                        Text(if (done) "已完成" else "打卡", fontSize = 12.sp, color = if (done) InkGray else BrandGreen)
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -507,9 +377,40 @@ private fun GradesSection(
 @Composable
 private fun GradeRow(item: GradeItem) {
     Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).padding(end = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(item.courseName, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = InkDark)
+                Text(
+                    item.courseName,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = InkDark,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (item.examNature.isNotBlank()) {
+                    val isRelearn = item.examNature == "重修"
+                    val badgeBg = when {
+                        isRelearn -> NoticeBlueSoft
+                        IsDark -> Color(0x28F59E0B)
+                        else -> Color(0xFFFEF3E2)
+                    }
+                    val badgeFg = when {
+                        isRelearn -> NoticeBlue
+                        IsDark -> Color(0xFFFCD34D)
+                        else -> Color(0xFFB45309)
+                    }
+                    Text(
+                        item.examNature,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = badgeFg,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(badgeBg)
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
                 if (item.isNew) {
                     Text(
                         "新出成绩",
@@ -523,13 +424,26 @@ private fun GradeRow(item: GradeItem) {
                     )
                 }
             }
+            val detail = buildString {
+                append("${item.courseType} · ${item.credits} 学分 · 绩点 ${"%.2f".format(item.gpa)}")
+                if (item.initialScoreText.isNotBlank()) {
+                    append(" · 初修 ${item.initialScoreText}")
+                }
+            }
             Text(
-                "${item.courseType} · ${item.credits} 学分 · 绩点 ${"%.2f".format(item.gpa)}",
+                detail,
                 fontSize = 11.sp,
                 color = InkGray,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        Text(item.scoreText.ifBlank { "—" }, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = BrandGreen)
+        Text(
+            item.scoreText.ifBlank { "—" },
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (item.passed) BrandGreen else Color(0xFFD64541),
+        )
     }
 }
 

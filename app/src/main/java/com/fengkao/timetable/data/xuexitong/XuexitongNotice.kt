@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 enum class NoticeCategory(val label: String) {
     HOMEWORK("作业"),
+    EVALUATION("评价"),
     SIGNIN("签到"),
     ANNOUNCEMENT("公告"),
     OTHER("通知"),
@@ -27,4 +28,6 @@ data class XuexitongNotice(
     val attachmentUrl: String = "",
     val attachmentKind: String = "",
     val attachmentSize: String = "",
+    /** 通知中心数字 ID（部分旧通知接口的整数 `id`/`noticeId`），用于原生直达通知正文页。 */
+    val numericNoticeId: Int? = null,
 )

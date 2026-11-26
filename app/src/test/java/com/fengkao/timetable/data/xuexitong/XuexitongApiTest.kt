@@ -122,6 +122,27 @@ class XuexitongApiTest {
         )
         val notices = api.fetchNotices(maxPages = 1)
         assertEquals("ONLY-UUID", notices.single().id)
+        assertEquals(null, notices.single().numericNoticeId)
+    }
+
+    @Test
+    fun fetchNoticesExtractsPositiveNumericNoticeIdSeparatelyFromIdCode() {
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"status":true,"notices":{"lastPage":true,"list":[
+                  {"id":987654,"idCode":"ID-UNREAD","title":"开课通知","content":"正文","completeTime":"2026-10-22 10:00"},
+                  {"id":"abc-not-int","noticeId":"0","idCode":"ID-ZERO","title":"零值","content":"正文","completeTime":"2026-10-22 09:00"}
+                ]}}
+                """.trimIndent()
+            )
+        )
+        val notices = api.fetchNotices(maxPages = 1)
+        assertEquals(2, notices.size)
+        val first = notices.first { it.id == "ID-UNREAD" }
+        assertEquals(987654, first.numericNoticeId)
+        val second = notices.first { it.id == "ID-ZERO" }
+        assertEquals(null, second.numericNoticeId)
     }
 
     @Test(expected = XuexitongSessionExpired::class)

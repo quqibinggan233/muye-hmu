@@ -41,9 +41,17 @@ object NoticeFormat {
             .trim()
     }
 
+    private val evaluationRegex = Regex("评价表|教学评价|课堂教学.*评价|评教|学生评价|满意度调查|问卷调查")
+
+    fun isEvaluation(title: String, content: String, attachmentName: String = ""): Boolean {
+        val text = "$title\n$content\n$attachmentName"
+        return evaluationRegex.containsMatchIn(text)
+    }
+
     fun classify(title: String, content: String): NoticeCategory {
         val text = "$title\n$content"
         return when {
+            isEvaluation(title, content) -> NoticeCategory.EVALUATION
             Regex("签到|手势签到|位置签到|签到码|扫码签到").containsMatchIn(text) -> NoticeCategory.SIGNIN
             Regex("作业|测验|测试|实验报告|提交|截止|习题|考试|小组任务").containsMatchIn(text) -> NoticeCategory.HOMEWORK
             Regex("公告|通知|调课|停课|补课|讲座|活动|课程安排|课件|资料|附件|安装方法|学习资料").containsMatchIn(text) -> NoticeCategory.ANNOUNCEMENT
